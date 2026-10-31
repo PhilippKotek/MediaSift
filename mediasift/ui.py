@@ -1,6 +1,7 @@
 """Tkinter user interface for MediaSift."""
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
@@ -11,6 +12,7 @@ from typing import Any
 
 from .core import scan_sources
 from .exporter import export_scan
+from .folder_picker import pick_folders
 from .models import ScanCancelled, ScanResult
 
 
@@ -36,7 +38,7 @@ class MediaSiftApp:
         outer.grid(row=0, column=0, sticky="nsew")
         outer.columnconfigure(0, weight=1)
 
-        ttk.Label(outer, text="Quellordner", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Label(outer, text="Quellordner (Strg-/Umschalt-Klick für mehrere)", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
         source_row = ttk.Frame(outer)
         source_row.grid(row=1, column=0, sticky="ew", pady=(5, 10))
         source_row.columnconfigure(0, weight=1)
@@ -114,13 +116,27 @@ class MediaSiftApp:
         self.export_button.pack(side="left")
 
     def _add_source(self) -> None:
-        path = filedialog.askdirectory(title="Quellordner auswählen", parent=self.root)
-        if path:
-            p = Path(path)
-            if p not in self.sources:
-                self.sources.append(p)
-                self.source_list.insert(tk.END, str(p))
-                self._invalidate_scan()
+        try:
+            if os.name == "nt":
+                paths = pick_folders(self.root.winfo_id(), "Quellordner auswählen")
+            else:
+                path = filedialog.askdirectory(title="Quellordner auswählen", parent=self.root)
+                paths = [Path(path)] if path else []
+        except OSError as exc:
+            messagebox.showerror("Ordnerauswahl fehlgeschlagen", str(exc), parent=self.root)
+            return
+        known = {os.path.normcase(str(source.resolve())) for source in self.sources}
+        added = False
+        for path in paths:
+            source = path.resolve()
+            key = os.path.normcase(str(source))
+            if source.is_dir() and key not in known:
+                known.add(key)
+                self.sources.append(source)
+                self.source_list.insert(tk.END, str(source))
+                added = True
+        if added:
+            self._invalidate_scan()
 
     def _remove_sources(self) -> None:
         indexes = list(self.source_list.curselection())

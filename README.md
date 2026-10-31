@@ -20,7 +20,7 @@ py -3.10 -m venv .venv
 .venv\Scripts\python.exe app.py
 ```
 
-Im Fenster Quellordner und Zielordner auswählen, **Scan starten**, Ergebnisse prüfen und **Ergebnisse exportieren**. Der Abbruch stoppt nach der aktuell verarbeiteten Datei; ein bereits teilweise gefüllter Exportordner bleibt bestehen.
+Im Fenster auf **Ordner hinzufügen** klicken. Im Windows-Dialog können mehrere Quellordner desselben Verzeichnisses mit Strg- oder Umschalt-Klick gemeinsam ausgewählt werden. Für Ordner aus anderen Verzeichnissen den Dialog erneut öffnen. Danach Zielordner auswählen, **Scan starten**, Ergebnisse prüfen und **Ergebnisse exportieren**. Der Abbruch stoppt nach der aktuell verarbeiteten Datei; ein bereits teilweise gefüllter Exportordner bleibt bestehen.
 
 ## Windows-EXE bauen
 
