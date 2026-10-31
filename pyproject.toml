@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mediasift"
+version = "0.1.0"
+description = "Desktop app that collects unique images and copies videos"
+requires-python = ">=3.10"
+dependencies = ["Pillow==12.3.0"]
+
+[project.optional-dependencies]
+build = ["pyinstaller==6.22.3"]
+test = ["pytest>=8,<9"]
+
+[project.gui-scripts]
+mediasift = "mediasift.ui:main"
+
+[tool.setuptools.packages.find]
+include = ["mediasift*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
