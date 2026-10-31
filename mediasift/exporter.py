@@ -39,13 +39,13 @@ def _free_name(directory: Path, original: str, reserved: set[str]) -> Path:
 
 def _copy_one(record: FileRecord, directory: Path, reserved: set[str]) -> None:
     if not _unchanged(record):
-        raise RuntimeError("Datei wurde seit dem Scan verändert")
+        raise RuntimeError("File changed since the scan")
     target = _free_name(directory, record.path.name, reserved)
     temporary = target.with_name(f".{target.name}.part")
     try:
         shutil.copy2(record.path, temporary)
         if not _unchanged(record):
-            raise RuntimeError("Datei wurde während des Kopierens verändert")
+            raise RuntimeError("File changed while it was being copied")
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -67,7 +67,7 @@ def export_scan(
         run_dir = destination_root / f"MediaSift_{stamp}_{suffix}"
         suffix += 1
     run_dir.mkdir()
-    images_dir = run_dir / "Bilder"
+    images_dir = run_dir / "Images"
     videos_dir = run_dir / "Videos"
     images_dir.mkdir()
     videos_dir.mkdir()
@@ -89,7 +89,7 @@ def export_scan(
             else:
                 exported.videos_copied += 1
         except (OSError, RuntimeError) as exc:
-            exported.issues.append(ScanIssue(record.path, f"Kopieren fehlgeschlagen: {exc}"))
+            exported.issues.append(ScanIssue(record.path, f"Copy failed: {exc}"))
         if progress:
             progress(index, total, str(record.path))
     return exported

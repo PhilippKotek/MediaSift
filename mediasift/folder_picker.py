@@ -24,7 +24,7 @@ class _GUID(ctypes.Structure):
 
 def _check(hr: int) -> None:
     if hr < 0:
-        raise OSError(f"Windows-Ordnerauswahl fehlgeschlagen (0x{hr & 0xFFFFFFFF:08X})")
+        raise OSError(f"Windows folder selection failed (0x{hr & 0xFFFFFFFF:08X})")
 
 
 def _method(pointer: ctypes.c_void_p, index: int, result_type: object, *arg_types: object):
@@ -37,10 +37,10 @@ def _release(pointer: ctypes.c_void_p) -> None:
         _method(pointer, 2, ctypes.c_ulong)(pointer)
 
 
-def pick_folders(owner_hwnd: int, title: str = "Quellordner auswählen") -> list[Path]:
+def pick_folders(owner_hwnd: int, title: str = "Select source folders") -> list[Path]:
     """Return selected folders, or an empty list when the dialog is cancelled."""
     if os.name != "nt":
-        raise OSError("Die Mehrfachauswahl benötigt Windows.")
+        raise OSError("Multiple folder selection requires Windows.")
 
     ole32 = ctypes.OleDLL("ole32")
     ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]

@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="340" viewBox="0 0 1000 340" role="img" aria-labelledby="title desc">
+  <title id="title">MediaSift workflow</title>
+  <desc id="desc">Two backup folders feed a scan, which exports unique images and all videos into separate folders.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#55718d"/></marker>
+    <style>
+      .box{fill:#fff;stroke:#ccd8e4;stroke-width:2}.label{font:600 20px system-ui,sans-serif;fill:#18324b}.small{font:15px system-ui,sans-serif;fill:#55718d}.line{fill:none;stroke:#55718d;stroke-width:3;marker-end:url(#arrow)}
+    </style>
+  </defs>
+  <rect width="1000" height="340" rx="22" fill="#f4f8fb"/>
+  <rect class="box" x="35" y="72" width="205" height="72" rx="14"/><text class="label" x="137" y="116" text-anchor="middle">Backup A</text>
+  <rect class="box" x="35" y="196" width="205" height="72" rx="14"/><text class="label" x="137" y="240" text-anchor="middle">Backup B</text>
+  <path class="line" d="M240 108H310Q340 108 340 138V160H385"/><path class="line" d="M240 232H310Q340 232 340 202V180H385"/>
+  <rect x="390" y="112" width="220" height="116" rx="18" fill="#e5f0ff" stroke="#8eb3dc" stroke-width="2"/>
+  <text class="label" x="500" y="163" text-anchor="middle">Scan together</text><text class="small" x="500" y="190" text-anchor="middle">Find pixel-identical images</text>
+  <path class="line" d="M610 170H690V106H745"/><path class="line" d="M690 170V234H745"/>
+  <rect class="box" x="750" y="68" width="215" height="76" rx="14"/><text class="label" x="857" y="113" text-anchor="middle">Images</text>
+  <rect class="box" x="750" y="196" width="215" height="76" rx="14"/><text class="label" x="857" y="241" text-anchor="middle">Videos</text>
+  <text class="small" x="857" y="132" text-anchor="middle">One copy per match group</text>
+  <text class="small" x="857" y="260" text-anchor="middle">Copied unchanged</text>
+</svg>

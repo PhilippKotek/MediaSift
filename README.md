@@ -1,38 +1,34 @@
 # MediaSift
 
-MediaSift sammelt aus mehreren Quellordnern einmalige Bilder und kopiert alle Videos in einen neuen Exportordner. Die Quellordner bleiben unverändert.
+MediaSift is a completely vibe-coded tool for removing duplicate images from multiple backups—without deleting anything from the originals.
 
-## Funktionsweise
+Choose backup folders, scan them together, review the matches, then export one copy of each unique image and every video into a new folder. Videos are copied unchanged and are not checked for duplicates. Your source files are never modified.
 
-- Unterordner der ausgewählten Quellen werden durchsucht. Überlappende Quellordner werden nur einmal berücksichtigt.
-- JPEG, PNG, WebP, BMP und einseitige TIFFs werden anhand ihrer dekodierten Pixel nach EXIF-Ausrichtung verglichen. Dateinamen und gewöhnliche Metadaten zählen nicht als Bildinhalt. Pro Gruppe gleicher Bilder wird die Datei mit dem alphabetisch ersten Pfad kopiert.
-- GIFs, animierte oder mehrseitige Bilder werden übersprungen und im Fenster gemeldet. Ähnliche, skalierte oder neu komprimierte Bilder können unterschiedliche Pixel haben und bleiben dann getrennt.
-- MP4, MOV, M4V, AVI, MKV, WebM und WMV werden anhand ihrer Dateiendung als Videos erkannt. Jedes Video wird ohne Duplikatprüfung kopiert.
-- Jeder Export erzeugt einen eigenen Ordner `MediaSift_JJJJMMTT_HHMMSS` mit `Bilder` und `Videos`. Bei gleichen Dateinamen werden Zusätze wie `_2` vergeben. Das Ziel darf nicht innerhalb einer Quelle liegen.
+![MediaSift workflow: Backup A and Backup B are scanned into separate Images and Videos output folders](docs/workflow.svg)
 
-## Start aus Python
+## Download for Windows
 
-Voraussetzung: Windows mit Python 3.10 oder neuer. In PowerShell im Repository:
+[Download the latest Windows x64 release](https://github.com/PhilippKotek/MediaSift/releases/latest). Open `MediaSift.exe`; no Python installation is needed.
 
-```powershell
-py -3.10 -m venv .venv
-.venv\Scripts\python.exe -m pip install -e .
-.venv\Scripts\python.exe app.py
-```
+## Quick start
 
-Im Fenster auf **Ordner hinzufügen** klicken. Im Windows-Dialog können mehrere Quellordner desselben Verzeichnisses mit Strg- oder Umschalt-Klick gemeinsam ausgewählt werden. Für Ordner aus anderen Verzeichnissen den Dialog erneut öffnen. Danach Zielordner auswählen, **Scan starten**, Ergebnisse prüfen und **Ergebnisse exportieren**. Der Abbruch stoppt nach der aktuell verarbeiteten Datei; ein bereits teilweise gefüllter Exportordner bleibt bestehen.
+1. Click **Add folder…** and select the backups to combine. Ctrl- or Shift-click to choose several folders in the same location; open the picker again for folders elsewhere. For example, add `Backup A` and `Backup B` to gather media from both.
+2. Choose a destination folder outside the backups, then click **Start scan**.
+3. Review the duplicate image groups and click **Export results**.
+4. Open the new `MediaSift_YYYYMMDD_HHMMSS` folder in your destination. It contains `Images` and `Videos` subfolders.
 
-## Windows-EXE bauen
+![MediaSift window showing a scan and duplicate image results](docs/screenshot.jpg)
 
-```powershell
-.\build.ps1
-```
+## What MediaSift matches
 
-Für den EXE-Build ist Python 3.11 nötig. Das Skript findet eine mit `uv` verwaltete oder über `py` installierte Python-3.11-Version, installiert die Build-Abhängigkeiten in `.venv-build` und erstellt `dist\MediaSift.exe`. Falls Python 3.11 fehlt, kann es mit `uv python install 3.11` installiert werden. Die EXE enthält Python und die Bibliotheken und benötigt auf dem Zielrechner keine separate Python-Installation. Die EXE wird auf Windows gebaut und ist für Windows bestimmt.
+- **Images:** JPG/JPEG, PNG, WebP, BMP, and single-page TIFF. Images match only when their decoded pixels and dimensions are equal, after applying EXIF orientation. This is not perceptual matching: resized, recompressed, or otherwise visually similar images can remain separate. Metadata and filenames do not affect the match. One representative is exported per group: the file with the alphabetically first full path (case-insensitive, with a case-sensitive tie-break).
+- **Videos:** MP4, MOV, M4V, AVI, MKV, WebM, and WMV. Every supported video is copied; videos are not deduplicated.
+- **Not supported:** GIF, animated images, and multi-frame images such as multi-page TIFFs are skipped or reported as issues.
 
-## Tests
+## Safe output
 
-```powershell
-.venv\Scripts\python.exe -m pip install -e '.[test]'
-.venv\Scripts\python.exe -m pytest -q
-```
+MediaSift creates a new timestamped export folder and never deletes or edits originals. The destination cannot be inside a selected source folder. If output files have the same name, MediaSift adds a number such as `_2` to avoid overwriting. You can cancel a scan or export; canceling an export leaves its partial results in the new export folder. Files changed after scanning are skipped and reported.
+
+## License
+
+[MIT](LICENSE)

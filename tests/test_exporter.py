@@ -24,7 +24,7 @@ def test_export_copies_unique_images_and_every_video_without_touching_sources(tm
     assert first.run_dir != second.run_dir
     assert first.images_copied == 2
     assert first.videos_copied == 2
-    assert len(list((first.run_dir / "Bilder").iterdir())) == 2
+    assert len(list((first.run_dir / "Images").iterdir())) == 2
     assert sorted(p.name for p in (first.run_dir / "Videos").iterdir()) == ["clip.mp4", "clip_2.mp4"]
     assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
 
