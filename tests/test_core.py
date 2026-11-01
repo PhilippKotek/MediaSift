@@ -35,8 +35,69 @@ def test_reports_gif_and_lists_video_without_hashing(tmp_path: Path) -> None:
 
     assert result.total == 2
     assert [record.path for record in result.videos] == [video.resolve()]
+    assert result.video_groups[0].fingerprint is None
     assert len(result.issues) == 1
     assert "GIF" in result.issues[0].message
+
+
+def test_hashes_same_size_video_and_pdf_files_and_keeps_different_files_separate(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "cache"))
+    source = tmp_path / "source"
+    source.mkdir()
+    files = [source / "a.mp4", source / "b.mkv", source / "c.pdf", source / "d.pdf"]
+    files[0].write_bytes(b"video")
+    files[1].write_bytes(b"video")
+    files[2].write_bytes(b"pdf1")
+    files[3].write_bytes(b"pdf2")
+
+    result = scan_sources([source], tmp_path / "out")
+
+    assert len(result.video_groups) == 1
+    assert result.video_groups[0].fingerprint is not None
+    assert len(result.video_groups[0].files) == 2
+    assert len(result.pdf_groups) == 2
+    assert all(group.fingerprint is None and len(group.files) == 1 for group in result.pdf_groups)
+
+
+def test_scan_cache_hits_changed_files_and_full_rescan(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "cache"))
+    source = tmp_path / "source"
+    source.mkdir()
+    a, b = source / "a.png", source / "b.png"
+    Image.new("RGB", (3, 3), "green").save(a)
+    Image.new("RGB", (3, 3), "green").save(b)
+    first = scan_sources([source], tmp_path / "out")
+    assert first.diagnostics["image_hashes_computed"] == 2
+    warm = scan_sources([source], tmp_path / "out")
+    assert warm.diagnostics["image_cache_hits"] == 2
+    assert warm.diagnostics["image_hashes_computed"] == 0
+    full = scan_sources([source], tmp_path / "out", full_rescan=True)
+    assert full.diagnostics["image_hashes_computed"] == 2
+    Image.new("RGB", (3, 3), "blue").save(a)
+    changed = scan_sources([source], tmp_path / "out")
+    assert changed.diagnostics["image_hashes_computed"] == 1
+    assert changed.diagnostics["image_cache_hits"] == 1
+
+
+def test_file_disappearing_during_recording_becomes_issue(tmp_path: Path, monkeypatch) -> None:
+    import mediasift.core as core
+
+    source = tmp_path / "source"
+    source.mkdir()
+    image = source / "a.png"
+    Image.new("RGB", (2, 2), "red").save(image)
+    original_record = core._record
+
+    def missing_record(path: Path):
+        if path == image.resolve():
+            raise FileNotFoundError("gone during scan")
+        return original_record(path)
+
+    monkeypatch.setattr(core, "_record", missing_record)
+    result = scan_sources([source], tmp_path / "out")
+
+    assert result.groups == []
+    assert any(issue.path == image.resolve() and "gone during scan" in issue.message for issue in result.issues)
 
 
 def test_rejects_destination_inside_source(tmp_path: Path) -> None:

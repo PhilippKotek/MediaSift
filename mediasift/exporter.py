@@ -1,4 +1,4 @@
-"""Copy the selected media into a new, isolated export directory."""
+"""Copy one representative from each duplicate group into an isolated export."""
 
 from __future__ import annotations
 
@@ -17,9 +17,11 @@ class ExportResult:
     run_dir: Path
     images_copied: int = 0
     videos_copied: int = 0
+    pdfs_copied: int = 0
     issues: list[ScanIssue] = field(default_factory=list)
     cancelled: bool = False
     copied_files: list[tuple[Path, Path]] = field(default_factory=list)
+    omitted_files: list[tuple[str, Path, Path]] = field(default_factory=list)
 
 
 def _unchanged(record: FileRecord) -> bool:
@@ -60,7 +62,7 @@ def export_scan(
     cancelled: Optional[Callable[[], bool]] = None,
     sources: Optional[list[Path]] = None,
 ) -> ExportResult:
-    """Copy one image per group and every video; never touch the source files."""
+    """Copy one file per image, video, and PDF group; source files are untouched."""
     destination_root = Path(destination_root).expanduser().resolve()
     destination_root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -70,52 +72,70 @@ def export_scan(
         run_dir = destination_root / f"MediaSift_{stamp}_{suffix}"
         suffix += 1
     run_dir.mkdir()
-    images_dir = run_dir / "Images"
-    videos_dir = run_dir / "Videos"
-    images_dir.mkdir()
-    videos_dir.mkdir()
+    directories = {kind: run_dir / folder for kind, folder in (
+        ("image", "Images"), ("video", "Videos"), ("pdf", "PDFs"),
+    )}
+    for directory in directories.values():
+        directory.mkdir()
 
     exported = ExportResult(run_dir=run_dir)
-    image_names: set[str] = set()
-    video_names: set[str] = set()
-    jobs = [(group.files[0], images_dir, image_names, "image") for group in result.groups]
-    jobs.extend((record, videos_dir, video_names, "video") for record in result.videos)
+    reserved = {kind: set() for kind in directories}
+    jobs: list[tuple[FileRecord, str, list[FileRecord]]] = []
+    for kind, groups in (("image", result.groups), ("video", result.video_groups), ("pdf", result.pdf_groups)):
+        for group in groups:
+            if group.files:
+                representative = group.files[0]
+                jobs.append((representative, kind, group.files[1:]))
+    # Existing scanner warnings are useful context in the export report.
+    exported.issues.extend(result.issues)
     total = len(jobs)
-    for index, (record, directory, reserved, kind) in enumerate(jobs, 1):
+    completed = 0
+    for index, (record, kind, duplicates) in enumerate(jobs, 1):
         if cancelled and cancelled():
             exported.cancelled = True
             break
         try:
-            target = _copy_one(record, directory, reserved)
+            target = _copy_one(record, directories[kind], reserved[kind])
             exported.copied_files.append((target.relative_to(run_dir), record.path))
+            for duplicate in duplicates:
+                exported.omitted_files.append((kind, duplicate.path, record.path))
             if kind == "image":
                 exported.images_copied += 1
-            else:
+            elif kind == "video":
                 exported.videos_copied += 1
+            else:
+                exported.pdfs_copied += 1
         except (OSError, RuntimeError) as exc:
             exported.issues.append(ScanIssue(record.path, f"Copy failed: {exc}"))
+        completed = index
         if progress:
             progress(index, total, str(record.path))
-    _write_manifest(exported, sources or [], total)
+    _write_manifest(exported, sources or [], total, completed)
     return exported
 
 
-def _write_manifest(exported: ExportResult, sources: list[Path], total: int) -> None:
+def _write_manifest(exported: ExportResult, sources: list[Path], total: int, completed: int) -> None:
     status = "Cancelled" if exported.cancelled else ("Partial" if exported.issues else "Complete")
     lines = [
         "MediaSift duplicate export",
         f"Status: {status}",
         f"Images copied (one per duplicate group): {exported.images_copied}",
-        f"Videos copied (all scanned videos): {exported.videos_copied}",
-        f"Jobs attempted or stopped out of: {total}",
+        f"Videos copied (one per duplicate group): {exported.videos_copied}",
+        f"PDFs copied (one per duplicate group): {exported.pdfs_copied}",
+        f"Jobs completed: {completed} of {total}",
+        f"Issues: {len(exported.issues)}",
+        f"Duplicate members omitted: {len(exported.omitted_files)}",
         "",
         "Selected source folders:",
     ]
     lines.extend(f"  {source}" for source in sources)
     lines.extend(["", "Copied files (export path -> original source path):"])
     lines.extend(f"  {output.as_posix()} -> {source}" for output, source in exported.copied_files)
+    if exported.omitted_files:
+        lines.extend(["", "Omitted duplicate members (source -> kept representative):"])
+        lines.extend(f"  {kind}: {source} -> {kept}" for kind, source, kept in exported.omitted_files)
     if exported.issues:
-        lines.extend(["", "Copy issues:"])
+        lines.extend(["", "Issues:"])
         lines.extend(f"  {issue.path}: {issue.message}" for issue in exported.issues)
     target = exported.run_dir / "Manifest.txt"
     temporary = exported.run_dir / ".Manifest.txt.part"

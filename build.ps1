@@ -25,14 +25,27 @@ if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
 # The rest of PySide6's hook-collected multimedia plugins and FFmpeg DLLs stay.
 $spec = @'
 from pathlib import Path
+from importlib.metadata import distribution
 
 root = Path(SPECPATH).resolve().parent
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+
+pdfium_binaries = collect_dynamic_libs('pypdfium2') + collect_dynamic_libs('pypdfium2_raw')
+pdfium_datas = (collect_data_files('pypdfium2', include_py_files=False)
+                + collect_data_files('pypdfium2_raw', include_py_files=False))
+pdfium_licenses = Path(distribution('pypdfium2')._path) / 'licenses'
+if not pdfium_licenses.is_dir():
+    raise RuntimeError(f'Could not locate pypdfium2 license files: {pdfium_licenses}')
+pdfium_license_datas = [
+    (str(path), str(Path('PDFium_Licenses') / path.relative_to(pdfium_licenses).parent))
+    for path in pdfium_licenses.rglob('*') if path.is_file()
+]
 a = Analysis(
-    [str(root / 'app.py')], pathex=[str(root)], binaries=[],
+    [str(root / 'app.py')], pathex=[str(root)],
     datas=[
         (str(root / 'docs' / 'assets' / 'mediasift.png'), 'mediasift/assets'),
         (str(root / 'THIRD_PARTY_NOTICES.md'), '.'),
-    ], hiddenimports=[], hookspath=[], hooksconfig={}, runtime_hooks=[],
+    ] + pdfium_datas + pdfium_license_datas, binaries=pdfium_binaries, hiddenimports=[], hookspath=[], hooksconfig={}, runtime_hooks=[],
     excludes=[], noarchive=False,
 )
 a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.casefold() not in {'icuuc.dll', 'icudt78.dll'}]
@@ -53,5 +66,20 @@ if ($LASTEXITCODE -ne 0) { throw 'EXE build failed' }
 
 # Keep a readable license notice next to the onefile executable for users.
 Copy-Item -LiteralPath 'THIRD_PARTY_NOTICES.md' -Destination 'dist\THIRD_PARTY_NOTICES.md' -Force
+$pdfiumLicenses = & $python -c "from importlib.metadata import distribution; from pathlib import Path; print(Path(distribution('pypdfium2')._path) / 'licenses')"
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pdfiumLicenses -PathType Container)) {
+    throw "Could not locate pypdfium2 license files: $pdfiumLicenses"
+}
+$distRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'dist'))
+$pdfiumSidecar = [IO.Path]::GetFullPath((Join-Path $distRoot 'PDFium_Licenses'))
+if (-not $pdfiumSidecar.StartsWith($distRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Refusing to replace a directory outside the build output: $pdfiumSidecar"
+}
+if (Test-Path -LiteralPath $pdfiumSidecar) {
+    Remove-Item -LiteralPath $pdfiumSidecar -Recurse -Force
+}
+New-Item -ItemType Directory -Path $pdfiumSidecar | Out-Null
+Copy-Item -Path (Join-Path $pdfiumLicenses '*') -Destination $pdfiumSidecar -Recurse -Force
 Write-Host "EXE: $(Join-Path $PSScriptRoot 'dist\MediaSift.exe')"
 Write-Host "Notices: $(Join-Path $PSScriptRoot 'dist\THIRD_PARTY_NOTICES.md')"
+Write-Host "PDFium licenses: $(Join-Path $PSScriptRoot 'dist\PDFium_Licenses')"

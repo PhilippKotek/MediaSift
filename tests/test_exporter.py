@@ -6,7 +6,7 @@ from mediasift.core import scan_sources
 from mediasift.exporter import export_scan
 
 
-def test_export_copies_unique_images_and_every_video_without_touching_sources(tmp_path: Path) -> None:
+def test_export_copies_one_per_image_video_and_pdf_group_without_touching_sources(tmp_path: Path) -> None:
     source = tmp_path / "source"
     (source / "nested").mkdir(parents=True)
     destination = tmp_path / "destination"
@@ -15,6 +15,8 @@ def test_export_copies_unique_images_and_every_video_without_touching_sources(tm
     Image.new("RGB", (2, 2), "blue").save(source / "nested" / "a.png")
     (source / "clip.mp4").write_bytes(b"same video")
     (source / "nested" / "clip.mp4").write_bytes(b"same video")
+    (source / "document.pdf").write_bytes(b"same PDF")
+    (source / "nested" / "document.pdf").write_bytes(b"same PDF")
     before = {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()}
 
     scan = scan_sources([source], destination)
@@ -23,9 +25,14 @@ def test_export_copies_unique_images_and_every_video_without_touching_sources(tm
 
     assert first.run_dir != second.run_dir
     assert first.images_copied == 2
-    assert first.videos_copied == 2
+    assert first.videos_copied == 1
+    assert first.pdfs_copied == 1
     assert len(list((first.run_dir / "Images").iterdir())) == 2
-    assert sorted(p.name for p in (first.run_dir / "Videos").iterdir()) == ["clip.mp4", "clip_2.mp4"]
+    assert [p.name for p in (first.run_dir / "Videos").iterdir()] == ["clip.mp4"]
+    assert [p.name for p in (first.run_dir / "PDFs").iterdir()] == ["document.pdf"]
+    manifest = (first.run_dir / "Manifest.txt").read_text(encoding="utf-8")
+    assert "Duplicate members omitted: 3" in manifest
+    assert "PDFs/document.pdf -> " in manifest
     assert {p.relative_to(source): p.read_bytes() for p in source.rglob("*") if p.is_file()} == before
 
 

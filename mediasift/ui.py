@@ -58,7 +58,7 @@ class Job(QThread):
 
 
 class PreviewSignals(QObject):
-    ready = Signal(int, object, str)
+    ready = Signal(int, object, int, str)
 
 
 class ImagePreview(QRunnable):
@@ -80,9 +80,40 @@ class ImagePreview(QRunnable):
         except Exception as exc:
             qimage, error = None, str(exc)
         try:
-            self.signals.ready.emit(self.generation, qimage, error)
+            self.signals.ready.emit(self.generation, qimage, 0, error)
         except RuntimeError:
             # The window may have closed while a preview was being decoded.
+            pass
+
+
+class PdfPreview(QRunnable):
+    def __init__(self, generation: int, path: Path, page: int, max_size: tuple[int, int]):
+        super().__init__()
+        self.generation, self.path, self.page, self.max_size = generation, path, page, max_size
+        self.signals = PreviewSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            import pypdfium2 as pdfium
+            document = pdfium.PdfDocument(str(self.path))
+            try:
+                count = len(document)
+                page = document[self.page]
+                width, height = page.get_size()
+                scale = min(self.max_size[0] / max(width, 1), self.max_size[1] / max(height, 1), 1.5)
+                bitmap = page.render(scale=scale)
+                image = bitmap.to_pil().convert("RGBA")
+                data = image.tobytes("raw", "RGBA")
+                qimage = QImage(data, image.width, image.height, image.width * 4, QImage.Format.Format_RGBA8888).copy()
+            finally:
+                document.close()
+            error = ""
+        except Exception as exc:
+            qimage, count, error = None, 0, str(exc)
+        try:
+            self.signals.ready.emit(self.generation, qimage, count, error)
+        except RuntimeError:
             pass
 
 
@@ -108,6 +139,9 @@ class MediaSiftApp(QMainWindow):
         self._review_skipped: set[int] = set()
         self._review_history: list[int] = []
         self._review_root: Path | None = None
+        self._pdf_page = 0
+        self._pdf_page_count = 0
+        self._pdf_current_path: Path | None = None
         self._setup_media()
         self._build()
 
@@ -151,6 +185,8 @@ class MediaSiftApp(QMainWindow):
         self.results_tabs = QTabWidget(); root.addWidget(self.results_tabs, 1)
         self.group_tree = QTreeWidget(); self.group_tree.setHeaderLabels(["Group / file", "Files / size"])
         self.group_tree.setColumnWidth(0, 650); self.results_tabs.addTab(self.group_tree, "Duplicate images")
+        self.video_tree = QTreeWidget(); self.video_tree.setHeaderLabels(["Group / file", "Files / size"]); self.results_tabs.addTab(self.video_tree, "Duplicate videos")
+        self.pdf_tree = QTreeWidget(); self.pdf_tree.setHeaderLabels(["Group / file", "Files / size"]); self.results_tabs.addTab(self.pdf_tree, "Duplicate PDFs")
         self.issue_tree = QTreeWidget(); self.issue_tree.setHeaderLabels(["Path", "Message"])
         self.results_tabs.addTab(self.issue_tree, "Issues")
         controls = QHBoxLayout(); self.progress = QProgressBar(); controls.addWidget(self.progress, 1)
@@ -158,8 +194,9 @@ class MediaSiftApp(QMainWindow):
         actions = QHBoxLayout(); actions.addStretch()
         self.cancel_button = QPushButton("Cancel", clicked=self._cancel); self.cancel_button.setEnabled(False)
         self.scan_button = QPushButton("Start scan", clicked=self._start_scan)
+        self.full_rescan_button = QPushButton("Full rescan", clicked=self._start_full_rescan)
         self.export_button = QPushButton("Export results", clicked=self._start_export); self.export_button.setEnabled(False)
-        actions.addWidget(self.cancel_button); actions.addWidget(self.scan_button); actions.addWidget(self.export_button); root.addLayout(actions)
+        actions.addWidget(self.cancel_button); actions.addWidget(self.scan_button); actions.addWidget(self.full_rescan_button); actions.addWidget(self.export_button); root.addLayout(actions)
 
     def _build_review(self):
         root = QVBoxLayout(self.review_page)
@@ -169,7 +206,7 @@ class MediaSiftApp(QMainWindow):
         self.review_choose = QPushButton("Choose folder…", clicked=self._choose_review_root); top.addWidget(self.review_choose)
         root.addLayout(top)
         self.preview_stack = QStackedWidget()
-        self.review_preview = QLabel("Choose a folder to review images and videos.")
+        self.review_preview = QLabel("Choose a folder to review images, videos, and PDFs.")
         self.review_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.review_preview.setMinimumSize(300, 300); self.review_preview.setStyleSheet("background:#171717;color:#ddd")
         self.video = QVideoWidget()
@@ -178,6 +215,12 @@ class MediaSiftApp(QMainWindow):
         self.preview_stack.addWidget(self.review_preview)
         self.preview_stack.addWidget(self.video)
         root.addWidget(self.preview_stack, 1)
+        pdf_navigation = QHBoxLayout()
+        self.pdf_previous_button = QPushButton("Previous page", clicked=lambda: self._change_pdf_page(-1))
+        self.pdf_next_button = QPushButton("Next page", clicked=lambda: self._change_pdf_page(1))
+        self.pdf_previous_button.setEnabled(False); self.pdf_next_button.setEnabled(False)
+        pdf_navigation.addStretch(); pdf_navigation.addWidget(self.pdf_previous_button); pdf_navigation.addWidget(self.pdf_next_button); pdf_navigation.addStretch()
+        root.addLayout(pdf_navigation)
         self.review_path = QLabel(""); self.review_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         root.addWidget(self.review_path)
         playback = QHBoxLayout()
@@ -189,7 +232,7 @@ class MediaSiftApp(QMainWindow):
         root.addLayout(playback)
         self.player.setVideoOutput(self.video)
         self.media_error_label = QLabel(""); root.addWidget(self.media_error_label)
-        self.open_player = QPushButton("Open in default player", clicked=self._open_default); self.open_player.hide(); root.addWidget(self.open_player)
+        self.open_player = QPushButton("Open in default app", clicked=self._open_default); self.open_player.hide(); root.addWidget(self.open_player)
         self.review_counts = QLabel("Kept: 0   Discarded: 0   Unreviewed: 0"); root.addWidget(self.review_counts)
         self.review_position = QLabel("No items"); root.addWidget(self.review_position)
         buttons = QHBoxLayout()
@@ -209,12 +252,13 @@ class MediaSiftApp(QMainWindow):
         buttons.addWidget(self.keep_button, 2)
         root.addLayout(buttons)
         self.export_kept_button = QPushButton("Export kept…", clicked=self._export_kept); root.addWidget(self.export_kept_button)
-        self.review_hints = QLabel("A / ← Discard    D / → Keep    S Skip    Backspace Previous    Space Play/Pause")
+        self.review_hints = QLabel("A / ← Discard    D / → Keep    S Skip    Backspace Previous    Space Play/Pause    PageUp / PageDown PDF pages")
         self.review_hints.setStyleSheet("font-weight: 600; color: #444")
         root.addWidget(self.review_hints)
         self._make_shortcut("A", lambda: self._decide("discard")); self._make_shortcut("Left", lambda: self._decide("discard"))
         self._make_shortcut("D", lambda: self._decide("keep")); self._make_shortcut("Right", lambda: self._decide("keep"))
         self._make_shortcut("S", self._skip); self._make_shortcut("Backspace", self._previous); self._make_shortcut("Space", self._toggle_play)
+        self._make_shortcut("PgUp", lambda: self._change_pdf_page(-1)); self._make_shortcut("PgDown", lambda: self._change_pdf_page(1))
 
     def _make_shortcut(self, key, callback):
         shortcut = QShortcut(QKeySequence(key), self)
@@ -256,7 +300,7 @@ class MediaSiftApp(QMainWindow):
         self.result = None; self.export_button.setEnabled(False); self._clear_results()
         self.summary.setText("Settings changed. Start the scan again.")
 
-    def _clear_results(self): self.group_tree.clear(); self.issue_tree.clear()
+    def _clear_results(self): self.group_tree.clear(); self.video_tree.clear(); self.pdf_tree.clear(); self.issue_tree.clear()
 
     def _start_scan(self):
         if self.busy: return
@@ -267,6 +311,11 @@ class MediaSiftApp(QMainWindow):
         self.result = None; self.export_button.setEnabled(False); self._clear_results(); self.summary.setText("Preparing scan…")
         self._start_job(scan_sources, list(self.sources), self.destination, "Scan")
 
+    def _start_full_rescan(self):
+        if self.busy or not self.sources or self.destination is None: return
+        self.result = None; self.export_button.setEnabled(False); self._clear_results(); self.summary.setText("Preparing full rescan…")
+        self._start_job(partial(scan_sources, full_rescan=True), list(self.sources), self.destination, "Full rescan")
+
     def _start_export(self):
         if self.result is not None and self.destination is not None:
             self._start_job(partial(export_scan, sources=list(self.sources)), self.result, self.destination, "Export")
@@ -274,7 +323,7 @@ class MediaSiftApp(QMainWindow):
     def _start_job(self, fn, *args):
         title = args[-1]; args = args[:-1]
         self.busy = True; self.progress.setValue(0); self.status.setText(f"Preparing {title.lower()}…")
-        for button in (self.add_button, self.remove_button, self.dest_button, self.scan_button): button.setEnabled(False)
+        for button in (self.add_button, self.remove_button, self.dest_button, self.scan_button, self.full_rescan_button): button.setEnabled(False)
         self.cancel_button.setEnabled(True); self.export_button.setEnabled(False)
         self.job = Job(fn, *args); self.job.signals.progress.connect(self._progress); self.job.signals.done.connect(lambda r: self._job_done(r, title))
         self.job.signals.failed.connect(lambda e: self._job_failed(e, title)); self.job.signals.cancelled.connect(lambda: self._job_cancelled(title)); self._launch_job(self.job)
@@ -293,18 +342,18 @@ class MediaSiftApp(QMainWindow):
 
     def _finish_job(self):
         self.busy = False
-        for button in (self.add_button, self.remove_button, self.dest_button, self.scan_button): button.setEnabled(True)
+        for button in (self.add_button, self.remove_button, self.dest_button, self.scan_button, self.full_rescan_button): button.setEnabled(True)
         self.cancel_button.setEnabled(False); self.export_button.setEnabled(self.result is not None)
 
     def _job_done(self, outcome, title):
         self._finish_job()
-        if title == "Scan":
+        if title in {"Scan", "Full rescan"}:
             self.result = outcome; self._render_result(outcome); self.status.setText("Scan complete")
         else:
             self.status.setText("Export complete" if not outcome.cancelled else "Export cancelled")
             self._render_result(self.result)
             for issue in outcome.issues: self._add_issue(issue.path, issue.message)
-            QMessageBox.information(self, "Export", f"Export folder:\n{outcome.run_dir}\n\nImages: {outcome.images_copied}\nVideos: {outcome.videos_copied}\nIssues: {len(outcome.issues)}")
+            QMessageBox.information(self, "Export", f"Export folder:\n{outcome.run_dir}\n\nImages: {outcome.images_copied}\nVideos: {outcome.videos_copied}\nPDFs: {outcome.pdfs_copied}\nIssues: {len(outcome.issues)}")
 
     def _job_failed(self, error, title):
         self._finish_job(); self.status.setText("Error"); QMessageBox.critical(self, f"{title} failed", error)
@@ -314,13 +363,21 @@ class MediaSiftApp(QMainWindow):
         if self.job: self.job.cancel_flag.set(); self.cancel_button.setEnabled(False); self.status.setText("Cancelling…")
 
     def _render_result(self, result):
-        self._clear_results(); groups = [g for g in result.groups if len(g.files) > 1]; count = 0
-        for index, group in enumerate(groups, 1):
-            node = QTreeWidgetItem([f"Group {index} · {group.fingerprint[:12]}", str(len(group.files))]); self.group_tree.addTopLevelItem(node)
-            count += len(group.files)
-            for record in group.files: node.addChild(QTreeWidgetItem([str(record.path), self._format_size(record.size)]))
+        self._clear_results()
+        def render_groups(tree, groups):
+            duplicates = [g for g in groups if len(g.files) > 1]
+            count = 0
+            for index, group in enumerate(duplicates, 1):
+                fingerprint = group.fingerprint or "unavailable"
+                node = QTreeWidgetItem([f"Group {index} · {fingerprint[:12]}", str(len(group.files))]); tree.addTopLevelItem(node)
+                count += len(group.files)
+                for record in group.files: node.addChild(QTreeWidgetItem([str(record.path), self._format_size(record.size)]))
+            return duplicates, count
+        groups, count = render_groups(self.group_tree, result.groups)
+        video_groups, video_count = render_groups(self.video_tree, result.video_groups)
+        pdf_groups, pdf_count = render_groups(self.pdf_tree, result.pdf_groups)
         for issue in result.issues: self._add_issue(issue.path, issue.message)
-        self.summary.setText(f"Unique images: {len(result.groups)}   |   Duplicate groups: {len(groups)}   |   Files in duplicate groups: {count}   |   Videos: {len(result.videos)}   |   Ignored: {result.ignored}   |   Issues: {len(result.issues)}   |   Files scanned: {result.total}")
+        self.summary.setText(f"Images: {len(result.groups)} groups / {len(groups)} duplicate groups ({count} files)   |   Videos: {len(result.video_groups)} groups / {len(video_groups)} duplicate groups ({video_count} files)   |   PDFs: {len(result.pdf_groups)} groups / {len(pdf_groups)} duplicate groups ({pdf_count} files)   |   Ignored: {result.ignored}   |   Issues: {len(result.issues)}   |   Files scanned: {result.total}")
 
     def _add_issue(self, path, message): self.issue_tree.addTopLevelItem(QTreeWidgetItem([str(path), message]))
     @staticmethod
@@ -350,6 +407,7 @@ class MediaSiftApp(QMainWindow):
         self._review_skipped.clear()
         self._review_history.clear()
         self.review_index = next((i for i, item in enumerate(self.review_items) if item.decision is None), -1)
+        self._pdf_page = 0; self._pdf_page_count = 0; self._pdf_current_path = None
         self.review_choose.setEnabled(True); self._update_review()
 
     def _update_review(self):
@@ -357,6 +415,7 @@ class MediaSiftApp(QMainWindow):
         generation = self._preview_generation
         self.pool.clear()
         self.player.stop(); self.play_button.setText("Play"); self.media_error_label.clear(); self.open_player.hide()
+        self.pdf_previous_button.setEnabled(False); self.pdf_next_button.setEnabled(False)
         counts = self.session.counts if self.session else {"keep": 0, "discard": 0, "unreviewed": 0}
         self.review_counts.setText(f"Kept: {counts['keep']}   Discarded: {counts['discard']}   Unreviewed: {counts['unreviewed']}")
         if not self.review_items:
@@ -373,27 +432,53 @@ class MediaSiftApp(QMainWindow):
                 self.review_preview.setText("All items have a Keep or Discard decision. You can use Backspace to revisit your last decision.")
             self.preview_stack.setCurrentWidget(self.review_preview); self.play_button.setEnabled(False); self.seek.setEnabled(False); return
         self.review_index = min(self.review_index, len(self.review_items)-1); item = self.review_items[self.review_index]
+        if item.kind == "pdf" and self._pdf_current_path != item.path:
+            self._pdf_current_path = item.path; self._pdf_page = 0; self._pdf_page_count = 0
         self.seek.setEnabled(item.kind == "video")
         self.review_position.setText(f"Item {self.review_index+1} of {len(self.review_items)}")
         state = "Skipped · still unreviewed" if self.review_index in self._review_skipped and item.decision is None else (item.decision or "Unreviewed")
         self.review_path.setText(f"{item.path}  ·  {state}")
         if item.kind == "video":
             self.preview_stack.setCurrentWidget(self.video); self.play_button.setEnabled(True); self.player.setSource(QUrl.fromLocalFile(str(item.path)))
+        elif item.kind == "pdf":
+            self.preview_stack.setCurrentWidget(self.review_preview)
+            self.review_preview.setText("Loading PDF page…"); self.review_preview.setPixmap(QPixmap()); self.play_button.setEnabled(False)
+            task = PdfPreview(generation, item.path, self._pdf_page, (max(300, self.review_preview.width()), max(300, self.review_preview.height())))
+            task.signals.ready.connect(self._preview_ready); self.pool.start(task)
         else:
             self.preview_stack.setCurrentWidget(self.review_preview)
             self.review_preview.setText("Loading preview…"); self.play_button.setEnabled(False)
             task = ImagePreview(generation, item.path, (max(300,self.review_preview.width()), max(300,self.review_preview.height())))
             task.signals.ready.connect(self._preview_ready); self.pool.start(task)
 
-    def _preview_ready(self, generation, image, error):
-        if generation != self._preview_generation or not 0 <= self.review_index < len(self.review_items) or self.review_items[self.review_index].kind != "image": return
-        if error: self.review_preview.setText(f"Unable to display image: {error}"); return
+    def _preview_ready(self, generation, image, page_count, error):
+        if generation != self._preview_generation or not 0 <= self.review_index < len(self.review_items) or self.review_items[self.review_index].kind not in {"image", "pdf"}: return
+        item = self.review_items[self.review_index]
+        if item.kind == "pdf" and image is None:
+            self.review_preview.setText(f"Unable to display PDF: {error}\nUse Open in default app to view it.")
+            self.media_error_label.setText("PDF preview failed. The file may be password protected or damaged.")
+            self.pdf_previous_button.setEnabled(False); self.pdf_next_button.setEnabled(False)
+            self.open_player.show(); return
+        if image is None: self.review_preview.setText(f"Unable to display image: {error}"); return
+        if item.kind == "pdf":
+            self._pdf_page_count = page_count
+            self.review_position.setText(f"Item {self.review_index+1} of {len(self.review_items)} · Page {self._pdf_page+1} of {self._pdf_page_count}")
+            self.pdf_previous_button.setEnabled(self._pdf_page > 0)
+            self.pdf_next_button.setEnabled(self._pdf_page + 1 < self._pdf_page_count)
         pixmap = QPixmap.fromImage(image).scaled(self.review_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
         self.review_preview.setPixmap(pixmap)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if 0 <= self.review_index < len(self.review_items) and self.review_items[self.review_index].kind == "image": self._update_review()
+        if 0 <= self.review_index < len(self.review_items) and self.review_items[self.review_index].kind in {"image", "pdf"}: self._update_review()
+
+    def _change_pdf_page(self, delta):
+        if not (0 <= self.review_index < len(self.review_items)) or self.review_items[self.review_index].kind != "pdf" or not self._pdf_page_count:
+            return
+        page = min(max(self._pdf_page + delta, 0), self._pdf_page_count - 1)
+        if page != self._pdf_page:
+            self._pdf_page = page
+            self._update_review()
 
     def _next_undecided(self, start):
         if not self.review_items:
@@ -450,7 +535,7 @@ class MediaSiftApp(QMainWindow):
                 and self.player.source() == QUrl.fromLocalFile(str(self.review_items[self.review_index].path))):
             self.media_error_label.setText(f"Playback failed: {text or 'unknown media error'}"); self.open_player.show()
     def _open_default(self):
-        if self.review_items:
+        if 0 <= self.review_index < len(self.review_items):
             path = str(self.review_items[self.review_index].path)
             try:
                 if os.name == "nt": os.startfile(path)
@@ -472,7 +557,8 @@ class MediaSiftApp(QMainWindow):
         job.finished.connect(lambda: (self.review_choose.setEnabled(True), self.export_kept_button.setEnabled(True)))
         self._review_export_job = job; self._launch_job(job)
     def _review_export_done(self, result):
-        self._update_review(); QMessageBox.information(self, "Export kept", f"Export folder:\n{result.folder}\nIssues: {len(result.issues)}")
+        pdf_count = sum(1 for item in self.session.items if item.decision == "keep" and item.kind == "pdf")
+        self._update_review(); QMessageBox.information(self, "Export kept", f"Export folder:\n{result.folder}\nPDFs copied: {pdf_count}\nIssues: {len(result.issues)}")
 
     def closeEvent(self, event):
         running = [job for job in self._threads if job.isRunning()]

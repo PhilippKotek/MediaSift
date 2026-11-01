@@ -42,31 +42,46 @@ def _sort_key(path: Path) -> tuple[str, str]:
 
 
 def _discover(root: Path, progress, cancelled) -> list[tuple[Path, str, int, int]]:
-    paths: list[Path] = []
-    for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+    # Keep DirEntry objects through sorting so their cached metadata avoids an
+    # additional filesystem round trip for every file.
+    entries: list[tuple[str, str, Path, os.DirEntry]] = []
+    supported = _IMAGE_EXTENSIONS | _VIDEO_EXTENSIONS | {".pdf"}
+    stack = [root]
+    while stack:
         if cancelled and cancelled():
             raise ScanCancelled()
-        here = Path(current)
-        dirs[:] = sorted((d for d in dirs if not (here / d).is_symlink()), key=str.casefold)
-        for name in files:
-            path = here / name
-            if path.is_symlink():
+        here = stack.pop()
+        try:
+            with os.scandir(here) as iterator:
+                children = sorted(iterator, key=lambda entry: (entry.name.casefold(), entry.name))
+        except OSError:
+            continue
+        directories = []
+        for entry in children:
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    directories.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False) and Path(entry.name).suffix.casefold() in supported:
+                    path = Path(entry.path)
+                    relative = str(path.relative_to(root))
+                    entries.append((relative.casefold(), relative, path, entry))
+            except OSError:
                 continue
-            ext = path.suffix.casefold()
-            if ext in _IMAGE_EXTENSIONS | _VIDEO_EXTENSIONS:
-                paths.append(path)
-    paths.sort(key=lambda p: (str(p.relative_to(root)).casefold(), str(p.relative_to(root))))
+        stack.extend(reversed(directories))
+    entries.sort(key=lambda record: (record[0], record[1]))
     items = []
-    total = len(paths)
-    for index, path in enumerate(paths, 1):
+    total = len(entries)
+    for index, (_, _, path, entry) in enumerate(entries, 1):
         if cancelled and cancelled():
             raise ScanCancelled()
         try:
-            stat = path.stat(follow_symlinks=False)
-            kind = "video" if path.suffix.casefold() in _VIDEO_EXTENSIONS else "image"
+            stat = entry.stat(follow_symlinks=False)
+            ext = path.suffix.casefold()
+            kind = "pdf" if ext == ".pdf" else "video" if ext in _VIDEO_EXTENSIONS else "image"
             items.append((path, kind, stat.st_size, stat.st_mtime_ns))
         except OSError:
-            # A file disappearing during the scan is equivalent to a missing file.
             pass
         if progress:
             progress(index, total, str(path))
@@ -101,21 +116,23 @@ class ReviewSession:
                 PRIMARY KEY(root, relpath))""")
             root_text = str(root)
             # Missing files are omitted from this session's items but their decisions remain resumable.
+            rows = connection.execute(
+                "SELECT relpath,kind,size,mtime_ns,decision FROM decisions WHERE root=?", (root_text,)
+            ).fetchall()
+            existing = {row[0]: row[1:] for row in rows}
             items: list[ReviewItem] = []
+            updates = []
             for path, kind, size, mtime_ns in records:
                 relative = str(path.relative_to(root))
-                row = connection.execute(
-                    "SELECT kind,size,mtime_ns,decision FROM decisions WHERE root=? AND relpath=?",
-                    (root_text, relative),
-                ).fetchone()
+                row = existing.get(relative)
                 decision = row[3] if row and row[:3] == (kind, size, mtime_ns) else None
-                connection.execute(
-                    "INSERT INTO decisions(root,relpath,kind,size,mtime_ns,decision) VALUES(?,?,?,?,?,?) "
-                    "ON CONFLICT(root,relpath) DO UPDATE SET kind=excluded.kind,size=excluded.size,"
-                    "mtime_ns=excluded.mtime_ns,decision=excluded.decision",
-                    (root_text, relative, kind, size, mtime_ns, decision),
-                )
+                updates.append((root_text, relative, kind, size, mtime_ns, decision))
                 items.append(ReviewItem(path, kind, decision, size, mtime_ns))
+            connection.executemany(
+                "INSERT INTO decisions(root,relpath,kind,size,mtime_ns,decision) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(root,relpath) DO UPDATE SET kind=excluded.kind,size=excluded.size,"
+                "mtime_ns=excluded.mtime_ns,decision=excluded.decision", updates,
+            )
             connection.execute(
                 "INSERT INTO settings(key,value) VALUES('last_root',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (root_text,),
@@ -180,12 +197,12 @@ class ReviewSession:
             folder = destination / f"{base.name}_{suffix}"
             suffix += 1
         folder.mkdir()
-        reserved: dict[str, set[str]] = {"Images": set(), "Videos": set()}
+        reserved: dict[str, set[str]] = {"Images": set(), "Videos": set(), "PDFs": set()}
         total = len(kept)
         for index, item in enumerate(kept, 1):
             if cancelled and cancelled():
                 raise ScanCancelled()
-            subfolder = "Videos" if item.kind == "video" else "Images"
+            subfolder = {"video": "Videos", "pdf": "PDFs"}.get(item.kind, "Images")
             target_dir = folder / subfolder
             target_dir.mkdir(exist_ok=True)
             stem, suffix_ext = item.path.stem, item.path.suffix

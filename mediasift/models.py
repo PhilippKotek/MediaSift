@@ -16,6 +16,12 @@ class ImageGroup:
 
 
 @dataclass
+class BinaryGroup:
+    fingerprint: str | None
+    files: list[FileRecord]
+
+
+@dataclass
 class ScanIssue:
     path: Path
     message: str
@@ -24,10 +30,20 @@ class ScanIssue:
 @dataclass
 class ScanResult:
     groups: list[ImageGroup]
-    videos: list[FileRecord]
+    video_groups: list[BinaryGroup]
+    pdf_groups: list[BinaryGroup]
     issues: list[ScanIssue]
     ignored: int
     total: int
+    diagnostics: dict[str, int | float] | None = None
+
+    @property
+    def videos(self) -> list[FileRecord]:
+        return [record for group in self.video_groups for record in group.files]
+
+    @property
+    def pdfs(self) -> list[FileRecord]:
+        return [record for group in self.pdf_groups for record in group.files]
 
 
 class ScanCancelled(Exception):

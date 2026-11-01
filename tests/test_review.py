@@ -31,6 +31,19 @@ def test_discovery_order_and_symlink_skip(tmp_path: Path) -> None:
     session.close()
 
 
+def test_pdf_is_discovered_as_one_review_item_and_copied_unchanged(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    pdf = _touch(root / "docs" / "annual.PDF", b"%PDF-example-bytes")
+    session = ReviewSession.open(root, tmp_path / "review.db")
+    assert len(session.items) == 1
+    assert session.items[0].kind == "pdf"
+    session.set_decision(session.items[0], "keep")
+    result = session.export_kept(tmp_path / "out")
+    assert result.folder is not None
+    assert (result.folder / "PDFs" / pdf.name).read_bytes() == pdf.read_bytes()
+    session.close()
+
+
 def test_decisions_resume_and_changed_metadata_resets(tmp_path: Path) -> None:
     root = tmp_path / "source"
     photo = _touch(root / "photo.jpg", b"first")

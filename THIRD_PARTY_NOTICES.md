@@ -32,6 +32,18 @@ backend and deployment in the [Qt Multimedia documentation](https://doc.qt.io/qt
 MediaSift uses Pillow 12.3.0 for image decoding. Pillow is distributed under
 the HPND License. See the [Pillow 12.3.0 license](https://github.com/python-pillow/Pillow/blob/12.3.0/LICENSE).
 
+## pypdfium2 and PDFium
+
+MediaSift uses pypdfium2 5.14.0 to render PDF pages. pypdfium2 is distributed
+under Apache License 2.0 or BSD 3-Clause; PDFium is distributed under the BSD
+3-Clause license, with additional third-party components and attributions. The complete
+pypdfium2 distribution license tree is embedded in the executable and copied
+beside it as `PDFium_Licenses/` for readable access. Keep this directory when
+redistributing the executable. See the
+[pypdfium2 licensing documentation](https://pypdfium2.readthedocs.io/en/stable/license.html),
+[pypdfium2 license](https://github.com/pypdfium2-team/pypdfium2/blob/5.14.0/LICENSE),
+and [PDFium license and third-party notices](https://pdfium.googlesource.com/pdfium/+/refs/heads/main/LICENSE).
+
 ## PyInstaller
 
 The Windows executable is assembled with PyInstaller 6.22.3. PyInstaller is
@@ -42,10 +54,10 @@ PyInstaller and its bootloader. See the
 
 ## Source and replacement materials
 
-MediaSift is distributed under the MIT License; see [LICENSE](LICENSE). Qt
-and FFmpeg components are dynamically linked libraries in the executable
-bundle. Users should consult the linked license terms for rights to modify or
-replace those components and for any corresponding-source obligations. Qt's
+MediaSift is distributed under the MIT License; see [LICENSE](LICENSE). Qt,
+FFmpeg, and PDFium are dynamically linked libraries in the executable bundle.
+Users should consult the linked license terms for rights to modify or replace
+those components and for any corresponding-source obligations. Qt's
 official [LGPL compliance guidance](https://www.qt.io/licensing/open-source-lgpl-obligations)
 describes the obligations that apply to LGPL Qt distributions. No patent
 license for media codecs is granted by these notices; codec patent terms may
