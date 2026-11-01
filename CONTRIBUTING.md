@@ -8,7 +8,7 @@ The Windows onefile build uses Python 3.11. From PowerShell at the repository ro
 .\build.ps1
 ```
 
-The script installs the pinned project and build dependencies into `.venv-build`, regenerates the PNG/ICO app icon from `docs/assets/mediasift.svg`, then creates `dist/MediaSift-v<version>/MediaSift.exe` and `dist/MediaSift-v<version>-windows-x64.zip`. The versioned output folder contains `THIRD_PARTY_NOTICES.md` and the complete `PDFium_Licenses/` directory alongside the executable. This keeps builds separate from older `dist/MediaSift.exe` files. The bundle includes Qt Multimedia's FFmpeg backend for video playback and PDFium for PDF rendering. Share the ZIP when redistributing a build.
+The script installs the pinned project and build dependencies into `.venv-build`, regenerates the PNG/ICO app icon from `docs/assets/mediasift.svg`, then creates `dist/MediaSift-v<version>/MediaSift.exe` and `dist/MediaSift-v<version>-windows-x64.zip`. The versioned output folder contains `LICENSE`, `THIRD_PARTY_NOTICES.md`, and the complete `PDFium_Licenses/` directory alongside the executable. The ZIP includes the executable and all three license/notice items. This keeps builds separate from older `dist/MediaSift.exe` files. The bundle includes Qt Multimedia's FFmpeg backend for video playback and PDFium for PDF rendering. Share the ZIP when redistributing a build.
 
 The build spec filters Poppler ICU DLLs that can conflict with the ICU APIs Qt expects. Qt's multimedia plugins and FFmpeg runtime binaries remain included.
 

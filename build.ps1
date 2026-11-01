@@ -71,7 +71,8 @@ New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot 'build') | Ou
 & $python -m PyInstaller --noconfirm --clean --distpath $distRoot 'build\MediaSift.spec'
 if ($LASTEXITCODE -ne 0) { throw 'EXE build failed' }
 
-# Keep a readable license notice next to the onefile executable for users.
+# Keep the project license and third-party notices next to the onefile executable.
+Copy-Item -LiteralPath 'LICENSE' -Destination (Join-Path $distRoot 'LICENSE') -Force
 Copy-Item -LiteralPath 'THIRD_PARTY_NOTICES.md' -Destination (Join-Path $distRoot 'THIRD_PARTY_NOTICES.md') -Force
 $pdfiumLicenses = & $python -c "from importlib.metadata import distribution; from pathlib import Path; print(Path(distribution('pypdfium2')._path) / 'licenses')"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pdfiumLicenses -PathType Container)) {
@@ -90,11 +91,13 @@ $archive = Join-Path (Join-Path $PSScriptRoot 'dist') "MediaSift-v${version}-win
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 $archiveFiles = @(
     (Join-Path $distRoot 'MediaSift.exe'),
+    (Join-Path $distRoot 'LICENSE'),
     (Join-Path $distRoot 'THIRD_PARTY_NOTICES.md'),
     $pdfiumSidecar
 )
 Compress-Archive -LiteralPath $archiveFiles -DestinationPath $archive -CompressionLevel Optimal
 Write-Host "EXE: $(Join-Path $distRoot 'MediaSift.exe')"
+Write-Host "License: $(Join-Path $distRoot 'LICENSE')"
 Write-Host "Notices: $(Join-Path $distRoot 'THIRD_PARTY_NOTICES.md')"
 Write-Host "PDFium licenses: $(Join-Path $distRoot 'PDFium_Licenses')"
 Write-Host "Package: $archive"
