@@ -1,301 +1,495 @@
-"""Tkinter user interface for MediaSift."""
+"""PySide6 user interface for MediaSift."""
 from __future__ import annotations
 
 import os
 import queue
+import subprocess
+import sys
 import threading
 import time
-import tkinter as tk
+from functools import partial
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
-from typing import Any
+
+from PIL import Image, ImageOps, UnidentifiedImageError
+from PySide6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, QUrl, Signal, Slot
+from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut, QIcon
+from PySide6.QtWidgets import (
+    QApplication, QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
+    QMessageBox, QProgressBar, QPushButton, QSlider, QTabWidget, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget, QListWidget,
+    QStackedWidget,
+)
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from .core import scan_sources
 from .exporter import export_scan
 from .folder_picker import pick_folders
 from .models import ScanCancelled, ScanResult
+from .review import ReviewSession
+from .resources import resource_path
 
 
-class MediaSiftApp:
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("MediaSift – Find Duplicates")
-        self.root.geometry("900x650")
-        self.root.minsize(700, 500)
+class WorkerSignals(QObject):
+    progress = Signal(int, int, str)
+    done = Signal(object)
+    failed = Signal(str)
+    cancelled = Signal()
+
+
+class Job(QThread):
+    def __init__(self, fn, *args):
+        super().__init__()
+        self.fn, self.args = fn, args
+        self.signals = WorkerSignals()
+        self.cancel_flag = threading.Event()
+
+    def run(self):
+        try:
+            result = self.fn(*self.args, progress=self.report, cancelled=self.cancel_flag.is_set)
+            self.signals.done.emit(result)
+        except ScanCancelled:
+            self.signals.cancelled.emit()
+        except Exception as exc:
+            self.signals.failed.emit(str(exc))
+
+    def report(self, done, total, label):
+        self.signals.progress.emit(done, total, Path(label).name)
+
+
+class PreviewSignals(QObject):
+    ready = Signal(int, object, str)
+
+
+class ImagePreview(QRunnable):
+    def __init__(self, generation: int, path: Path, max_size: tuple[int, int]):
+        super().__init__()
+        self.generation, self.path, self.max_size = generation, path, max_size
+        self.signals = PreviewSignals()
+
+    @Slot()
+    def run(self):
+        try:
+            with Image.open(self.path) as source:
+                source = ImageOps.exif_transpose(source)
+                source.thumbnail(self.max_size, Image.Resampling.LANCZOS)
+                image = source.convert("RGBA")
+                data = image.tobytes("raw", "RGBA")
+                qimage = QImage(data, image.width, image.height, image.width * 4, QImage.Format.Format_RGBA8888).copy()
+            error = ""
+        except Exception as exc:
+            qimage, error = None, str(exc)
+        try:
+            self.signals.ready.emit(self.generation, qimage, error)
+        except RuntimeError:
+            # The window may have closed while a preview was being decoded.
+            pass
+
+
+class MediaSiftApp(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("MediaSift")
+        self.setWindowIcon(QIcon(resource_path("assets/mediasift.png")))
+        self.resize(1040, 760)
+        self.setMinimumSize(760, 560)
         self.sources: list[Path] = []
         self.destination: Path | None = None
         self.result: ScanResult | None = None
-        self.events: queue.Queue[tuple[Any, ...]] = queue.Queue()
-        self.cancel_event = threading.Event()
         self.busy = False
+        self.job: Job | None = None
+        self.pool = QThreadPool(self)
+        self.pool.setMaxThreadCount(1)
+        self._preview_generation = 0
+        self._threads: set[Job] = set()
+        self.session = None
+        self.review_items = []
+        self.review_index = 0
+        self._review_skipped: set[int] = set()
+        self._review_history: list[int] = []
+        self._review_root: Path | None = None
+        self._setup_media()
         self._build()
-        self.root.after(100, self._drain_events)
 
-    def _build(self) -> None:
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        outer = ttk.Frame(self.root, padding=12)
-        outer.grid(row=0, column=0, sticky="nsew")
-        outer.columnconfigure(0, weight=1)
+    def _setup_media(self):
+        self.player = QMediaPlayer(self)
+        self.audio = QAudioOutput(self)
+        self.audio.setVolume(0.7)
+        self.player.setAudioOutput(self.audio)
+        self.player.errorOccurred.connect(self._media_error)
 
-        ttk.Label(outer, text="Source folders (Ctrl/Shift-click to select multiple)", font=("Segoe UI", 11, "bold")).grid(row=0, column=0, sticky="w")
-        source_row = ttk.Frame(outer)
-        source_row.grid(row=1, column=0, sticky="ew", pady=(5, 10))
-        source_row.columnconfigure(0, weight=1)
-        self.source_list = tk.Listbox(source_row, height=4, selectmode=tk.EXTENDED, activestyle="dotbox")
-        self.source_list.grid(row=0, column=0, rowspan=2, sticky="nsew")
-        sb = ttk.Scrollbar(source_row, orient="vertical", command=self.source_list.yview)
-        sb.grid(row=0, column=1, rowspan=2, sticky="ns")
-        self.source_list.configure(yscrollcommand=sb.set)
-        self.add_button = ttk.Button(source_row, text="Add folder…", command=self._add_source)
-        self.add_button.grid(row=0, column=2, sticky="ew", padx=(8, 0))
-        self.remove_button = ttk.Button(source_row, text="Remove selected", command=self._remove_sources)
-        self.remove_button.grid(row=1, column=2, sticky="ew", padx=(8, 0), pady=(5, 0))
+    def _build(self):
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+        self.scan_page = QWidget()
+        self.review_page = QWidget()
+        self.tabs.addTab(self.scan_page, "Find duplicates")
+        self.tabs.addTab(self.review_page, "Review")
+        self._build_scan()
+        self._build_review()
 
-        dest = ttk.Frame(outer)
-        dest.grid(row=2, column=0, sticky="ew", pady=(0, 10))
-        dest.columnconfigure(1, weight=1)
-        ttk.Label(dest, text="Destination folder:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        self.destination_var = tk.StringVar(value="Not selected")
-        ttk.Label(dest, textvariable=self.destination_var).grid(row=0, column=1, sticky="ew")
-        self.destination_button = ttk.Button(dest, text="Choose…", command=self._choose_destination)
-        self.destination_button.grid(row=0, column=2, padx=(8, 0))
+    def _build_scan(self):
+        root = QVBoxLayout(self.scan_page)
+        row = QHBoxLayout()
+        root.addWidget(QLabel("Source folders (Ctrl/Shift-click to select multiple)"))
+        self.source_list = QListWidget()
+        self.source_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        row.addWidget(self.source_list, 1)
+        side = QVBoxLayout()
+        self.add_button = QPushButton("Add folder…", clicked=self._add_source)
+        self.remove_button = QPushButton("Remove selected", clicked=self._remove_sources)
+        side.addWidget(self.add_button); side.addWidget(self.remove_button); side.addStretch()
+        row.addLayout(side)
+        root.addLayout(row)
+        destrow = QHBoxLayout(); destrow.addWidget(QLabel("Destination folder:"))
+        self.dest_label = QLabel("Not selected"); self.dest_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        destrow.addWidget(self.dest_label, 1)
+        self.dest_button = QPushButton("Choose…", clicked=self._choose_destination); destrow.addWidget(self.dest_button)
+        root.addLayout(destrow)
+        self.summary = QLabel("Choose source and destination folders, then start the scan."); self.summary.setWordWrap(True)
+        root.addWidget(self.summary)
+        self.results_tabs = QTabWidget(); root.addWidget(self.results_tabs, 1)
+        self.group_tree = QTreeWidget(); self.group_tree.setHeaderLabels(["Group / file", "Files / size"])
+        self.group_tree.setColumnWidth(0, 650); self.results_tabs.addTab(self.group_tree, "Duplicate images")
+        self.issue_tree = QTreeWidget(); self.issue_tree.setHeaderLabels(["Path", "Message"])
+        self.results_tabs.addTab(self.issue_tree, "Issues")
+        controls = QHBoxLayout(); self.progress = QProgressBar(); controls.addWidget(self.progress, 1)
+        self.status = QLabel("Ready"); controls.addWidget(self.status); root.addLayout(controls)
+        actions = QHBoxLayout(); actions.addStretch()
+        self.cancel_button = QPushButton("Cancel", clicked=self._cancel); self.cancel_button.setEnabled(False)
+        self.scan_button = QPushButton("Start scan", clicked=self._start_scan)
+        self.export_button = QPushButton("Export results", clicked=self._start_export); self.export_button.setEnabled(False)
+        actions.addWidget(self.cancel_button); actions.addWidget(self.scan_button); actions.addWidget(self.export_button); root.addLayout(actions)
 
-        results = ttk.LabelFrame(outer, text="Scan results", padding=8)
-        results.grid(row=3, column=0, sticky="nsew")
-        outer.rowconfigure(3, weight=1)
-        results.columnconfigure(0, weight=1)
-        results.rowconfigure(1, weight=1)
-        self.summary_var = tk.StringVar(value="Choose source and destination folders, then start the scan.")
-        ttk.Label(results, textvariable=self.summary_var, wraplength=820).grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        self.tabs = ttk.Notebook(results)
-        self.tabs.grid(row=1, column=0, sticky="nsew")
-        duplicates = ttk.Frame(self.tabs, padding=5)
-        issues = ttk.Frame(self.tabs, padding=5)
-        self.tabs.add(duplicates, text="Duplicate images")
-        self.tabs.add(issues, text="Issues")
-        duplicates.columnconfigure(0, weight=1)
-        duplicates.rowconfigure(0, weight=1)
-        issues.columnconfigure(0, weight=1)
-        issues.rowconfigure(0, weight=1)
-        self.group_tree = ttk.Treeview(duplicates, columns=("count",), show="tree headings")
-        self.group_tree.heading("#0", text="Group / file")
-        self.group_tree.heading("count", text="Files")
-        self.group_tree.column("#0", width=650, stretch=True)
-        self.group_tree.column("count", width=90, anchor="center", stretch=False)
-        self.group_tree.grid(row=0, column=0, sticky="nsew")
-        group_scroll = ttk.Scrollbar(duplicates, orient="vertical", command=self.group_tree.yview)
-        group_scroll.grid(row=0, column=1, sticky="ns")
-        self.group_tree.configure(yscrollcommand=group_scroll.set)
-        self.issue_tree = ttk.Treeview(issues, columns=("message",), show="headings")
-        self.issue_tree.heading("#0", text="Path")
-        self.issue_tree["show"] = "tree headings"
-        self.issue_tree.heading("#0", text="Path")
-        self.issue_tree.heading("message", text="Message")
-        self.issue_tree.column("#0", width=400, stretch=True)
-        self.issue_tree.column("message", width=430, stretch=True)
-        self.issue_tree.grid(row=0, column=0, sticky="nsew")
-        issue_scroll = ttk.Scrollbar(issues, orient="vertical", command=self.issue_tree.yview)
-        issue_scroll.grid(row=0, column=1, sticky="ns")
-        self.issue_tree.configure(yscrollcommand=issue_scroll.set)
+    def _build_review(self):
+        root = QVBoxLayout(self.review_page)
+        top = QHBoxLayout(); top.addWidget(QLabel("Source folder:"))
+        self.review_root_label = QLabel("No folder selected"); self.review_root_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        top.addWidget(self.review_root_label, 1)
+        self.review_choose = QPushButton("Choose folder…", clicked=self._choose_review_root); top.addWidget(self.review_choose)
+        root.addLayout(top)
+        self.preview_stack = QStackedWidget()
+        self.review_preview = QLabel("Choose a folder to review images and videos.")
+        self.review_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.review_preview.setMinimumSize(300, 300); self.review_preview.setStyleSheet("background:#171717;color:#ddd")
+        self.video = QVideoWidget()
+        self.video.setMinimumSize(300, 300)
+        self.video.setStyleSheet("background:#171717")
+        self.preview_stack.addWidget(self.review_preview)
+        self.preview_stack.addWidget(self.video)
+        root.addWidget(self.preview_stack, 1)
+        self.review_path = QLabel(""); self.review_path.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        root.addWidget(self.review_path)
+        playback = QHBoxLayout()
+        self.play_button = QPushButton("Play", clicked=self._toggle_play); self.play_button.setEnabled(False)
+        self.seek = QSlider(Qt.Orientation.Horizontal); self.seek.setRange(0, 0); self.seek.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.seek.sliderMoved.connect(self.player.setPosition)
+        self.player.positionChanged.connect(self.seek.setValue); self.player.durationChanged.connect(lambda d: self.seek.setRange(0, d))
+        self.volume = QSlider(Qt.Orientation.Horizontal); self.volume.setRange(0, 100); self.volume.setValue(70); self.volume.setFocusPolicy(Qt.FocusPolicy.NoFocus); self.volume.valueChanged.connect(lambda v: self.audio.setVolume(v / 100))
+        playback.addWidget(self.play_button); playback.addWidget(self.seek, 1); playback.addWidget(QLabel("Volume")); playback.addWidget(self.volume)
+        root.addLayout(playback)
+        self.player.setVideoOutput(self.video)
+        self.media_error_label = QLabel(""); root.addWidget(self.media_error_label)
+        self.open_player = QPushButton("Open in default player", clicked=self._open_default); self.open_player.hide(); root.addWidget(self.open_player)
+        self.review_counts = QLabel("Kept: 0   Discarded: 0   Unreviewed: 0"); root.addWidget(self.review_counts)
+        self.review_position = QLabel("No items"); root.addWidget(self.review_position)
+        buttons = QHBoxLayout()
+        self.previous_button = QPushButton("Previous (Backspace)", clicked=self._previous)
+        self.skip_button = QPushButton("Skip (S)", clicked=self._skip)
+        self.discard_button = QPushButton("Discard  (A / ←)", clicked=lambda: self._decide("discard"))
+        self.keep_button = QPushButton("Keep  (D / →)", clicked=lambda: self._decide("keep"))
+        for button in (self.previous_button, self.skip_button, self.discard_button, self.keep_button):
+            button.setMinimumHeight(46)
+        self.discard_button.setToolTip("Mark this file as discarded. The original stays untouched.")
+        self.keep_button.setToolTip("Mark this file to include in a kept-files export.")
+        self.discard_button.setStyleSheet("QPushButton { background: #865260; color: white; font-weight: bold; border-radius: 5px; } QPushButton:hover { background: #704250; }")
+        self.keep_button.setStyleSheet("QPushButton { background: #248574; color: white; font-weight: bold; border-radius: 5px; } QPushButton:hover { background: #1b6b5d; }")
+        buttons.addWidget(self.previous_button, 1)
+        buttons.addWidget(self.skip_button, 1)
+        buttons.addWidget(self.discard_button, 2)
+        buttons.addWidget(self.keep_button, 2)
+        root.addLayout(buttons)
+        self.export_kept_button = QPushButton("Export kept…", clicked=self._export_kept); root.addWidget(self.export_kept_button)
+        self.review_hints = QLabel("A / ← Discard    D / → Keep    S Skip    Backspace Previous    Space Play/Pause")
+        self.review_hints.setStyleSheet("font-weight: 600; color: #444")
+        root.addWidget(self.review_hints)
+        self._make_shortcut("A", lambda: self._decide("discard")); self._make_shortcut("Left", lambda: self._decide("discard"))
+        self._make_shortcut("D", lambda: self._decide("keep")); self._make_shortcut("Right", lambda: self._decide("keep"))
+        self._make_shortcut("S", self._skip); self._make_shortcut("Backspace", self._previous); self._make_shortcut("Space", self._toggle_play)
 
-        controls = ttk.Frame(outer)
-        controls.grid(row=4, column=0, sticky="ew", pady=(10, 0))
-        controls.columnconfigure(0, weight=1)
-        self.progress = ttk.Progressbar(controls, mode="determinate", maximum=100)
-        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(controls, textvariable=self.status_var, width=28).grid(row=0, column=1, sticky="e")
-        actions = ttk.Frame(outer)
-        actions.grid(row=5, column=0, sticky="e", pady=(10, 0))
-        self.cancel_button = ttk.Button(actions, text="Cancel", command=self._cancel, state="disabled")
-        self.cancel_button.pack(side="left", padx=(0, 8))
-        self.scan_button = ttk.Button(actions, text="Start scan", command=self._start_scan)
-        self.scan_button.pack(side="left", padx=(0, 8))
-        self.export_button = ttk.Button(actions, text="Export results", command=self._start_export, state="disabled")
-        self.export_button.pack(side="left")
+    def _make_shortcut(self, key, callback):
+        shortcut = QShortcut(QKeySequence(key), self)
+        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        shortcut.activated.connect(lambda: self._review_shortcut(callback))
 
-    def _add_source(self) -> None:
+    def _review_shortcut(self, callback):
+        widget = QApplication.focusWidget()
+        if widget and widget.inherits("QLineEdit"):
+            return
+        if self.tabs.currentWidget() is self.review_page:
+            callback()
+
+    def _add_source(self):
         try:
-            if os.name == "nt":
-                paths = pick_folders(self.root.winfo_id(), "Select source folders")
+            if os.name == "nt": paths = pick_folders(int(self.winId()), "Select source folders")
             else:
-                path = filedialog.askdirectory(title="Select source folders", parent=self.root)
+                path = QFileDialog.getExistingDirectory(self, "Select source folder")
                 paths = [Path(path)] if path else []
         except OSError as exc:
-            messagebox.showerror("Folder selection failed", str(exc), parent=self.root)
-            return
-        known = {os.path.normcase(str(source.resolve())) for source in self.sources}
-        added = False
+            QMessageBox.critical(self, "Folder selection failed", str(exc)); return
+        known = {os.path.normcase(str(p.resolve())) for p in self.sources}
         for path in paths:
-            source = path.resolve()
-            key = os.path.normcase(str(source))
-            if source.is_dir() and key not in known:
-                known.add(key)
-                self.sources.append(source)
-                self.source_list.insert(tk.END, str(source))
-                added = True
-        if added:
-            self._invalidate_scan()
+            path = path.resolve()
+            if path.is_dir() and os.path.normcase(str(path)) not in known:
+                known.add(os.path.normcase(str(path))); self.sources.append(path); self.source_list.addItem(str(path))
+        self._invalidate_scan()
 
-    def _remove_sources(self) -> None:
-        indexes = list(self.source_list.curselection())
-        for index in reversed(indexes):
-            self.source_list.delete(index)
-            del self.sources[index]
-        if indexes:
-            self._invalidate_scan()
+    def _remove_sources(self):
+        for item in self.source_list.selectedItems():
+            index = self.source_list.row(item); self.source_list.takeItem(index); del self.sources[index]
+        self._invalidate_scan()
 
-    def _choose_destination(self) -> None:
-        path = filedialog.askdirectory(title="Select destination folder", parent=self.root)
-        if path:
-            self.destination = Path(path)
-            self.destination_var.set(str(self.destination))
-            self._invalidate_scan()
+    def _choose_destination(self):
+        path = QFileDialog.getExistingDirectory(self, "Select destination folder")
+        if path: self.destination = Path(path); self.dest_label.setText(path); self._invalidate_scan()
 
-    def _invalidate_scan(self) -> None:
-        self.result = None
-        self.export_button.configure(state="disabled")
-        self._clear_results()
-        self.summary_var.set("Settings changed. Start the scan again.")
+    def _invalidate_scan(self):
+        self.result = None; self.export_button.setEnabled(False); self._clear_results()
+        self.summary.setText("Settings changed. Start the scan again.")
 
-    def _clear_results(self) -> None:
-        for tree in (self.group_tree, self.issue_tree):
-            for item in tree.get_children(""):
-                tree.delete(item)
+    def _clear_results(self): self.group_tree.clear(); self.issue_tree.clear()
 
-    def _set_busy(self, busy: bool) -> None:
-        self.busy = busy
-        state = "disabled" if busy else "normal"
-        for widget in (self.add_button, self.remove_button, self.destination_button, self.scan_button):
-            widget.configure(state=state)
-        self.cancel_button.configure(state="normal" if busy else "disabled")
-        self.export_button.configure(state="disabled" if busy or self.result is None else "normal")
-
-    def _start_scan(self) -> None:
-        if self.busy:
-            return
+    def _start_scan(self):
+        if self.busy: return
         if not self.sources:
-            messagebox.showwarning("No source folders", "Please add at least one source folder.", parent=self.root)
-            return
+            QMessageBox.warning(self, "No source folders", "Please add at least one source folder."); return
         if self.destination is None:
-            messagebox.showwarning("No destination folder", "Please choose a destination folder.", parent=self.root)
-            return
-        self.result = None
-        self.export_button.configure(state="disabled")
-        self._clear_results()
-        self.summary_var.set("Preparing scan…")
-        self.progress.configure(value=0)
-        self.cancel_event.clear()
-        self._set_busy(True)
-        sources, destination = list(self.sources), self.destination
-        threading.Thread(target=self._scan_worker, args=(sources, destination), daemon=True).start()
+            QMessageBox.warning(self, "No destination folder", "Please choose a destination folder."); return
+        self.result = None; self.export_button.setEnabled(False); self._clear_results(); self.summary.setText("Preparing scan…")
+        self._start_job(scan_sources, list(self.sources), self.destination, "Scan")
 
-    def _scan_worker(self, sources: list[Path], destination: Path) -> None:
-        try:
-            result = scan_sources(sources, destination, progress=self._throttled_progress(), cancelled=self.cancel_event.is_set)
-            self.events.put(("scan_done", result))
-        except ScanCancelled:
-            self.events.put(("cancelled", "Scan"))
-        except Exception as exc:
-            self.events.put(("error", "Scan failed", str(exc)))
+    def _start_export(self):
+        if self.result is not None and self.destination is not None:
+            self._start_job(partial(export_scan, sources=list(self.sources)), self.result, self.destination, "Export")
 
-    def _start_export(self) -> None:
-        if self.busy or self.result is None or self.destination is None:
-            return
-        result, destination = self.result, self.destination
-        self.cancel_event.clear()
-        self.progress.configure(value=0)
-        self.status_var.set("Preparing export…")
-        self._set_busy(True)
-        threading.Thread(target=self._export_worker, args=(result, destination), daemon=True).start()
+    def _start_job(self, fn, *args):
+        title = args[-1]; args = args[:-1]
+        self.busy = True; self.progress.setValue(0); self.status.setText(f"Preparing {title.lower()}…")
+        for button in (self.add_button, self.remove_button, self.dest_button, self.scan_button): button.setEnabled(False)
+        self.cancel_button.setEnabled(True); self.export_button.setEnabled(False)
+        self.job = Job(fn, *args); self.job.signals.progress.connect(self._progress); self.job.signals.done.connect(lambda r: self._job_done(r, title))
+        self.job.signals.failed.connect(lambda e: self._job_failed(e, title)); self.job.signals.cancelled.connect(lambda: self._job_cancelled(title)); self._launch_job(self.job)
 
-    def _export_worker(self, result: ScanResult, destination: Path) -> None:
-        try:
-            outcome = export_scan(result, destination, progress=self._throttled_progress(), cancelled=self.cancel_event.is_set)
-            self.events.put(("export_done", outcome))
-        except ScanCancelled:
-            self.events.put(("cancelled", "Export"))
-        except Exception as exc:
-            self.events.put(("error", "Export failed", str(exc)))
+    def _launch_job(self, job):
+        self._threads.add(job)
+        job.finished.connect(lambda job=job: self._thread_finished(job))
+        job.start()
 
-    def _cancel(self) -> None:
-        self.cancel_event.set()
-        self.cancel_button.configure(state="disabled")
-        self.status_var.set("Cancelling…")
+    def _thread_finished(self, job):
+        self._threads.discard(job)
+        job.deleteLater()
 
-    def _throttled_progress(self):
-        last_update = 0.0
+    def _progress(self, done, total, label):
+        self.progress.setMaximum(max(total, 1)); self.progress.setValue(done); self.status.setText(label)
 
-        def report(done: int, total: int, label: str) -> None:
-            nonlocal last_update
-            now = time.monotonic()
-            if done == total or now - last_update >= 0.1:
-                last_update = now
-                self.events.put(("progress", done, total, Path(label).name))
+    def _finish_job(self):
+        self.busy = False
+        for button in (self.add_button, self.remove_button, self.dest_button, self.scan_button): button.setEnabled(True)
+        self.cancel_button.setEnabled(False); self.export_button.setEnabled(self.result is not None)
 
-        return report
+    def _job_done(self, outcome, title):
+        self._finish_job()
+        if title == "Scan":
+            self.result = outcome; self._render_result(outcome); self.status.setText("Scan complete")
+        else:
+            self.status.setText("Export complete" if not outcome.cancelled else "Export cancelled")
+            self._render_result(self.result)
+            for issue in outcome.issues: self._add_issue(issue.path, issue.message)
+            QMessageBox.information(self, "Export", f"Export folder:\n{outcome.run_dir}\n\nImages: {outcome.images_copied}\nVideos: {outcome.videos_copied}\nIssues: {len(outcome.issues)}")
 
-    def _drain_events(self) -> None:
-        try:
-            while True:
-                event = self.events.get_nowait()
-                kind = event[0]
-                if kind == "progress":
-                    _, done, total, label = event
-                    self.progress.configure(maximum=max(total, 1), value=done)
-                    self.status_var.set(str(label))
-                elif kind == "scan_done":
-                    self.result = event[1]
-                    self._render_result(self.result)
-                    self._set_busy(False)
-                    self.status_var.set("Scan complete")
-                    self.progress.configure(value=self.progress["maximum"])
-                elif kind == "export_done":
-                    outcome = event[1]
-                    self._set_busy(False)
-                    self.status_var.set("Export complete" if not outcome.cancelled else "Export cancelled")
-                    if self.result is not None:
-                        self._render_result(self.result)
-                    for issue in outcome.issues:
-                        self.issue_tree.insert("", "end", text=str(issue.path), values=(issue.message,))
-                    if outcome.issues:
-                        self.summary_var.set(f"{self.summary_var.get()}   |   Export issues: {len(outcome.issues)}")
-                    messagebox.showinfo("Export", f"Export folder:\n{outcome.run_dir}\n\nImages: {outcome.images_copied}\nVideos: {outcome.videos_copied}\nIssues: {len(outcome.issues)}", parent=self.root)
-                elif kind == "cancelled":
-                    self._set_busy(False)
-                    self.status_var.set(f"{event[1]} cancelled")
-                elif kind == "error":
-                    self._set_busy(False)
-                    self.status_var.set("Error")
-                    messagebox.showerror(event[1], event[2], parent=self.root)
-        except queue.Empty:
-            pass
-        self.root.after(100, self._drain_events)
+    def _job_failed(self, error, title):
+        self._finish_job(); self.status.setText("Error"); QMessageBox.critical(self, f"{title} failed", error)
 
-    def _render_result(self, result: ScanResult) -> None:
-        self._clear_results()
-        duplicate_groups = [group for group in result.groups if len(group.files) > 1]
-        dup_files = 0
-        for index, group in enumerate(duplicate_groups, 1):
-            iid = self.group_tree.insert("", "end", text=f"Group {index} · {group.fingerprint[:12]}", values=(len(group.files),), open=False)
-            dup_files += len(group.files)
-            for file in group.files:
-                self.group_tree.insert(iid, "end", text=str(file.path), values=(self._format_size(file.size),))
-        for issue in result.issues:
-            self.issue_tree.insert("", "end", text=str(issue.path), values=(issue.message,))
-        self.summary_var.set(f"Unique images: {len(result.groups)}   |   Duplicate groups: {len(duplicate_groups)}   |   Files in duplicate groups: {dup_files}   |   Videos: {len(result.videos)}   |   Ignored: {result.ignored}   |   Issues: {len(result.issues)}   |   Files scanned: {result.total}")
+    def _job_cancelled(self, title): self._finish_job(); self.status.setText(f"{title} cancelled")
+    def _cancel(self):
+        if self.job: self.job.cancel_flag.set(); self.cancel_button.setEnabled(False); self.status.setText("Cancelling…")
 
+    def _render_result(self, result):
+        self._clear_results(); groups = [g for g in result.groups if len(g.files) > 1]; count = 0
+        for index, group in enumerate(groups, 1):
+            node = QTreeWidgetItem([f"Group {index} · {group.fingerprint[:12]}", str(len(group.files))]); self.group_tree.addTopLevelItem(node)
+            count += len(group.files)
+            for record in group.files: node.addChild(QTreeWidgetItem([str(record.path), self._format_size(record.size)]))
+        for issue in result.issues: self._add_issue(issue.path, issue.message)
+        self.summary.setText(f"Unique images: {len(result.groups)}   |   Duplicate groups: {len(groups)}   |   Files in duplicate groups: {count}   |   Videos: {len(result.videos)}   |   Ignored: {result.ignored}   |   Issues: {len(result.issues)}   |   Files scanned: {result.total}")
+
+    def _add_issue(self, path, message): self.issue_tree.addTopLevelItem(QTreeWidgetItem([str(path), message]))
     @staticmethod
-    def _format_size(size: int) -> str:
-        if size < 1024:
-            return f"{size} B"
-        if size < 1024 * 1024:
-            return f"{size / 1024:.1f} KB"
+    def _format_size(size):
+        if size < 1024: return f"{size} B"
+        if size < 1024 * 1024: return f"{size / 1024:.1f} KB"
         return f"{size / (1024 * 1024):.1f} MB"
 
+    def _choose_review_root(self):
+        path = QFileDialog.getExistingDirectory(self, "Select review source folder")
+        if path: self._open_review(Path(path))
 
-def main() -> None:
-    root = tk.Tk()
-    MediaSiftApp(root)
-    root.mainloop()
+    def _open_review(self, root):
+        self.player.stop()
+        self._preview_generation += 1
+        self.pool.clear()
+        self.review_root_label.setText(str(root)); self.review_preview.setText("Preparing review…"); self.review_preview.setPixmap(QPixmap())
+        self.review_choose.setEnabled(False)
+        worker = Job(ReviewSession.open, root)
+        worker.signals.done.connect(lambda session: self._review_loaded(session, root))
+        worker.signals.failed.connect(lambda error: (self.review_choose.setEnabled(True), QMessageBox.critical(self, "Review failed", error)))
+        self._review_open_job = worker; self._launch_job(worker)
+
+    def _review_loaded(self, session, root):
+        if self.session: self.session.close()
+        self.session = session; self._review_root = root; self.review_items = session.items
+        self._review_skipped.clear()
+        self._review_history.clear()
+        self.review_index = next((i for i, item in enumerate(self.review_items) if item.decision is None), -1)
+        self.review_choose.setEnabled(True); self._update_review()
+
+    def _update_review(self):
+        self._preview_generation += 1
+        generation = self._preview_generation
+        self.pool.clear()
+        self.player.stop(); self.play_button.setText("Play"); self.media_error_label.clear(); self.open_player.hide()
+        counts = self.session.counts if self.session else {"keep": 0, "discard": 0, "unreviewed": 0}
+        self.review_counts.setText(f"Kept: {counts['keep']}   Discarded: {counts['discard']}   Unreviewed: {counts['unreviewed']}")
+        if not self.review_items:
+            self.review_index = -1
+            self.review_path.clear(); self.review_position.setText("No media found"); self.review_preview.setText("No supported media in this folder."); self.preview_stack.setCurrentWidget(self.review_preview); self.play_button.setEnabled(False); return
+        if self.review_index < 0:
+            self.review_path.clear()
+            unreviewed = counts["unreviewed"]
+            if unreviewed:
+                self.review_position.setText("No other unreviewed items")
+                self.review_preview.setText(f"{unreviewed} unreviewed item(s) were skipped. Press Backspace to revisit the last item.")
+            else:
+                self.review_position.setText("Review complete")
+                self.review_preview.setText("All items have a Keep or Discard decision. You can use Backspace to revisit your last decision.")
+            self.preview_stack.setCurrentWidget(self.review_preview); self.play_button.setEnabled(False); self.seek.setEnabled(False); return
+        self.review_index = min(self.review_index, len(self.review_items)-1); item = self.review_items[self.review_index]
+        self.seek.setEnabled(item.kind == "video")
+        self.review_position.setText(f"Item {self.review_index+1} of {len(self.review_items)}")
+        state = "Skipped · still unreviewed" if self.review_index in self._review_skipped and item.decision is None else (item.decision or "Unreviewed")
+        self.review_path.setText(f"{item.path}  ·  {state}")
+        if item.kind == "video":
+            self.preview_stack.setCurrentWidget(self.video); self.play_button.setEnabled(True); self.player.setSource(QUrl.fromLocalFile(str(item.path)))
+        else:
+            self.preview_stack.setCurrentWidget(self.review_preview)
+            self.review_preview.setText("Loading preview…"); self.play_button.setEnabled(False)
+            task = ImagePreview(generation, item.path, (max(300,self.review_preview.width()), max(300,self.review_preview.height())))
+            task.signals.ready.connect(self._preview_ready); self.pool.start(task)
+
+    def _preview_ready(self, generation, image, error):
+        if generation != self._preview_generation or not 0 <= self.review_index < len(self.review_items) or self.review_items[self.review_index].kind != "image": return
+        if error: self.review_preview.setText(f"Unable to display image: {error}"); return
+        pixmap = QPixmap.fromImage(image).scaled(self.review_preview.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.review_preview.setPixmap(pixmap)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if 0 <= self.review_index < len(self.review_items) and self.review_items[self.review_index].kind == "image": self._update_review()
+
+    def _next_undecided(self, start):
+        if not self.review_items:
+            return -1
+        count = len(self.review_items)
+        for offset in range(count):
+            index = (start + offset) % count
+            if self.review_items[index].decision is None:
+                return index
+        return -1
+
+    def _decide(self, decision):
+        if not self.session or not 0 <= self.review_index < len(self.review_items): return
+        current = self.review_index
+        self.session.set_decision(self.review_items[current], decision)
+        self._review_history.append(current)
+        self._review_skipped.discard(current)
+        self.review_index = self._next_undecided((current + 1) % len(self.review_items))
+        self._update_review()
+    def _skip(self):
+        if not 0 <= self.review_index < len(self.review_items):
+            return
+        current = self.review_index
+        self._review_history.append(current)
+        self._review_skipped.add(current)
+        # Move to another undecided item, wrapping once. If this is the only
+        # undecided item, leave it marked as skipped and show a clear end state.
+        next_index = -1
+        for offset in range(1, len(self.review_items)):
+            candidate = (current + offset) % len(self.review_items)
+            if self.review_items[candidate].decision is None and candidate not in self._review_skipped:
+                next_index = candidate
+                break
+        self.review_index = next_index
+        self._update_review()
+    def _previous(self):
+        if not self.review_items:
+            return
+        if self._review_history:
+            self.review_index = self._review_history.pop()
+        elif self.review_index < 0:
+            self.review_index = len(self.review_items) - 1
+        else:
+            self.review_index = (self.review_index - 1) % len(self.review_items)
+        self._update_review()
+    def _toggle_play(self):
+        if not (0 <= self.review_index < len(self.review_items)) or self.review_items[self.review_index].kind != "video":
+            return
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState: self.player.pause(); self.play_button.setText("Play")
+        else: self.player.play(); self.play_button.setText("Pause")
+    def _media_error(self, error, text):
+        if (error != QMediaPlayer.Error.NoError and 0 <= self.review_index < len(self.review_items)
+                and self.review_items[self.review_index].kind == "video"
+                and self.player.source() == QUrl.fromLocalFile(str(self.review_items[self.review_index].path))):
+            self.media_error_label.setText(f"Playback failed: {text or 'unknown media error'}"); self.open_player.show()
+    def _open_default(self):
+        if self.review_items:
+            path = str(self.review_items[self.review_index].path)
+            try:
+                if os.name == "nt": os.startfile(path)
+                elif sys.platform == "darwin": subprocess.Popen(["open", path])
+                else: subprocess.Popen(["xdg-open", path])
+            except OSError as exc: QMessageBox.critical(self, "Unable to open media", str(exc))
+    def _export_kept(self):
+        if not self.session: return
+        if self.session.counts["keep"] == 0:
+            QMessageBox.information(self, "Export kept", "There are no kept items to export yet.")
+            return
+        destination = QFileDialog.getExistingDirectory(self, "Choose export destination")
+        if not destination: return
+        if Path(destination).resolve() == self._review_root.resolve() or self._review_root.resolve() in Path(destination).resolve().parents:
+            QMessageBox.warning(self, "Invalid destination", "Choose a destination outside the review source folder."); return
+        self.review_choose.setEnabled(False); self.export_kept_button.setEnabled(False)
+        job = Job(self.session.export_kept, Path(destination)); job.signals.progress.connect(self._progress)
+        job.signals.done.connect(self._review_export_done); job.signals.failed.connect(lambda e: QMessageBox.critical(self, "Export failed", e))
+        job.finished.connect(lambda: (self.review_choose.setEnabled(True), self.export_kept_button.setEnabled(True)))
+        self._review_export_job = job; self._launch_job(job)
+    def _review_export_done(self, result):
+        self._update_review(); QMessageBox.information(self, "Export kept", f"Export folder:\n{result.folder}\nIssues: {len(result.issues)}")
+
+    def closeEvent(self, event):
+        running = [job for job in self._threads if job.isRunning()]
+        if running:
+            QMessageBox.information(self, "MediaSift is busy", "Wait for the current operation to finish before closing MediaSift.")
+            event.ignore()
+            return
+        self.player.stop()
+        if self.session: self.session.close()
+        super().closeEvent(event)
+
+
+def main():
+    app = QApplication.instance() or QApplication(sys.argv)
+    window = MediaSiftApp()
+    window.show()
+    # Resume the last available review session asynchronously at startup.
+    last = ReviewSession.last_root()
+    if last and Path(last).is_dir(): window._open_review(Path(last))
+    return app.exec()

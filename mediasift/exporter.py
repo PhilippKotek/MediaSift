@@ -19,6 +19,7 @@ class ExportResult:
     videos_copied: int = 0
     issues: list[ScanIssue] = field(default_factory=list)
     cancelled: bool = False
+    copied_files: list[tuple[Path, Path]] = field(default_factory=list)
 
 
 def _unchanged(record: FileRecord) -> bool:
@@ -37,7 +38,7 @@ def _free_name(directory: Path, original: str, reserved: set[str]) -> Path:
     return directory / candidate
 
 
-def _copy_one(record: FileRecord, directory: Path, reserved: set[str]) -> None:
+def _copy_one(record: FileRecord, directory: Path, reserved: set[str]) -> Path:
     if not _unchanged(record):
         raise RuntimeError("File changed since the scan")
     target = _free_name(directory, record.path.name, reserved)
@@ -47,6 +48,7 @@ def _copy_one(record: FileRecord, directory: Path, reserved: set[str]) -> None:
         if not _unchanged(record):
             raise RuntimeError("File changed while it was being copied")
         os.replace(temporary, target)
+        return target
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -56,6 +58,7 @@ def export_scan(
     destination_root: Path,
     progress: Optional[Callable[[int, int, str], None]] = None,
     cancelled: Optional[Callable[[], bool]] = None,
+    sources: Optional[list[Path]] = None,
 ) -> ExportResult:
     """Copy one image per group and every video; never touch the source files."""
     destination_root = Path(destination_root).expanduser().resolve()
@@ -83,7 +86,8 @@ def export_scan(
             exported.cancelled = True
             break
         try:
-            _copy_one(record, directory, reserved)
+            target = _copy_one(record, directory, reserved)
+            exported.copied_files.append((target.relative_to(run_dir), record.path))
             if kind == "image":
                 exported.images_copied += 1
             else:
@@ -92,4 +96,31 @@ def export_scan(
             exported.issues.append(ScanIssue(record.path, f"Copy failed: {exc}"))
         if progress:
             progress(index, total, str(record.path))
+    _write_manifest(exported, sources or [], total)
     return exported
+
+
+def _write_manifest(exported: ExportResult, sources: list[Path], total: int) -> None:
+    status = "Cancelled" if exported.cancelled else ("Partial" if exported.issues else "Complete")
+    lines = [
+        "MediaSift duplicate export",
+        f"Status: {status}",
+        f"Images copied (one per duplicate group): {exported.images_copied}",
+        f"Videos copied (all scanned videos): {exported.videos_copied}",
+        f"Jobs attempted or stopped out of: {total}",
+        "",
+        "Selected source folders:",
+    ]
+    lines.extend(f"  {source}" for source in sources)
+    lines.extend(["", "Copied files (export path -> original source path):"])
+    lines.extend(f"  {output.as_posix()} -> {source}" for output, source in exported.copied_files)
+    if exported.issues:
+        lines.extend(["", "Copy issues:"])
+        lines.extend(f"  {issue.path}: {issue.message}" for issue in exported.issues)
+    target = exported.run_dir / "Manifest.txt"
+    temporary = exported.run_dir / ".Manifest.txt.part"
+    try:
+        temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)

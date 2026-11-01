@@ -43,3 +43,46 @@ def test_changed_source_is_reported_and_not_copied(tmp_path: Path) -> None:
     assert exported.videos_copied == 0
     assert len(exported.issues) == 1
     assert list((exported.run_dir / "Videos").iterdir()) == []
+
+
+def test_manifest_lists_selected_roots_and_collision_output_mapping(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    (first / "clip.mp4").write_bytes(b"one")
+    (second / "clip.mp4").write_bytes(b"two")
+    destination = tmp_path / "out"
+    roots = [first, second]
+
+    exported = export_scan(scan_sources(roots, destination), destination, sources=roots)
+
+    manifest = (exported.run_dir / "Manifest.txt").read_text(encoding="utf-8")
+    assert "Status: Complete" in manifest
+    assert f"  {first}" in manifest and f"  {second}" in manifest
+    assert f"Videos/clip.mp4 -> {first / 'clip.mp4'}" in manifest
+    assert f"Videos/clip_2.mp4 -> {second / 'clip.mp4'}" in manifest
+
+
+def test_manifest_records_cancelled_partial_export(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.mp4").write_bytes(b"a")
+    (source / "b.mp4").write_bytes(b"b")
+    destination = tmp_path / "out"
+    calls = 0
+
+    def cancel_after_first() -> bool:
+        nonlocal calls
+        calls += 1
+        return calls > 1
+
+    exported = export_scan(
+        scan_sources([source], destination), destination,
+        cancelled=cancel_after_first, sources=[source],
+    )
+
+    manifest = (exported.run_dir / "Manifest.txt").read_text(encoding="utf-8")
+    assert exported.cancelled
+    assert "Status: Cancelled" in manifest
+    assert "Videos/" in manifest and " -> " in manifest

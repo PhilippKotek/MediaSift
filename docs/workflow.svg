@@ -1,21 +1,40 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="340" viewBox="0 0 1000 340" role="img" aria-labelledby="title desc">
-  <title id="title">MediaSift workflow</title>
-  <desc id="desc">Two backup folders feed a scan, which exports unique images and all videos into separate folders.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="440" viewBox="0 0 1100 440" role="img" aria-labelledby="title desc">
+  <title id="title">MediaSift workflows</title>
+  <desc id="desc">Find duplicates across backup folders, or review images and videos one at a time. Both workflows copy selected media to a new export.</desc>
   <defs>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#55718d"/></marker>
     <style>
-      .box{fill:#fff;stroke:#ccd8e4;stroke-width:2}.label{font:600 20px system-ui,sans-serif;fill:#18324b}.small{font:15px system-ui,sans-serif;fill:#55718d}.line{fill:none;stroke:#55718d;stroke-width:3;marker-end:url(#arrow)}
+      .heading{font:700 24px system-ui,sans-serif;fill:#18324b}
+      .label{font:600 20px system-ui,sans-serif;fill:#18324b}
+      .small{font:15px system-ui,sans-serif;fill:#55718d}
+      .box{fill:#fff;stroke:#cfdae6;stroke-width:2}
+      .arrow{fill:none;stroke:#6c849e;stroke-width:3;marker-end:url(#tip)}
     </style>
+    <marker id="tip" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#6c849e"/></marker>
   </defs>
-  <rect width="1000" height="340" rx="22" fill="#f4f8fb"/>
-  <rect class="box" x="35" y="72" width="205" height="72" rx="14"/><text class="label" x="137" y="116" text-anchor="middle">Backup A</text>
-  <rect class="box" x="35" y="196" width="205" height="72" rx="14"/><text class="label" x="137" y="240" text-anchor="middle">Backup B</text>
-  <path class="line" d="M240 108H310Q340 108 340 138V160H385"/><path class="line" d="M240 232H310Q340 232 340 202V180H385"/>
-  <rect x="390" y="112" width="220" height="116" rx="18" fill="#e5f0ff" stroke="#8eb3dc" stroke-width="2"/>
-  <text class="label" x="500" y="163" text-anchor="middle">Scan together</text><text class="small" x="500" y="190" text-anchor="middle">Find pixel-identical images</text>
-  <path class="line" d="M610 170H690V106H745"/><path class="line" d="M690 170V234H745"/>
-  <rect class="box" x="750" y="68" width="215" height="76" rx="14"/><text class="label" x="857" y="113" text-anchor="middle">Images</text>
-  <rect class="box" x="750" y="196" width="215" height="76" rx="14"/><text class="label" x="857" y="241" text-anchor="middle">Videos</text>
-  <text class="small" x="857" y="132" text-anchor="middle">One copy per match group</text>
-  <text class="small" x="857" y="260" text-anchor="middle">Copied unchanged</text>
+  <rect width="1100" height="440" rx="24" fill="#f4f8fb"/>
+  <text class="heading" x="40" y="51">Two workflows, one app</text>
+  <rect class="box" x="35" y="86" width="280" height="130" rx="18"/>
+  <rect x="35" y="86" width="7" height="130" rx="4" fill="#74a8e9"/>
+  <text class="label" x="62" y="139">Backup folders</text>
+  <text class="small" x="62" y="169">A, B, and their subfolders</text>
+  <path class="arrow" d="M315 151H382"/>
+  <rect x="390" y="86" width="300" height="130" rx="18" fill="#e6f0ff" stroke="#91b7e3" stroke-width="2"/>
+  <text class="label" x="418" y="139">Find duplicates</text>
+  <text class="small" x="418" y="169">Compare decoded image pixels</text>
+  <path class="arrow" d="M690 151H757"/>
+  <rect class="box" x="765" y="86" width="300" height="130" rx="18"/>
+  <text class="label" x="792" y="139">Unique images + all videos</text>
+  <text class="small" x="792" y="169">Copied to a new export</text>
+  <rect class="box" x="35" y="250" width="280" height="130" rx="18"/>
+  <rect x="35" y="250" width="7" height="130" rx="4" fill="#72c2a6"/>
+  <text class="label" x="62" y="303">Media folder</text>
+  <text class="small" x="62" y="333">Images and videos to review</text>
+  <path class="arrow" d="M315 315H382"/>
+  <rect x="390" y="250" width="300" height="130" rx="18" fill="#e9f7f1" stroke="#91cfb6" stroke-width="2"/>
+  <text class="label" x="418" y="303">Review one by one</text>
+  <text class="small" x="418" y="333">Keep / Discard / Skip</text>
+  <path class="arrow" d="M690 315H757"/>
+  <rect class="box" x="765" y="250" width="300" height="130" rx="18"/>
+  <text class="label" x="792" y="303">Only kept files</text>
+  <text class="small" x="792" y="333">Copied to a curated export</text>
 </svg>
