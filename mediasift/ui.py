@@ -11,13 +11,14 @@ from functools import partial
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
-from PySide6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, QUrl, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, Qt, QThread, QThreadPool, QUrl, QEvent, Signal, Slot
 from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut, QIcon
 from PySide6.QtWidgets import (
     QApplication, QAbstractItemView, QFileDialog, QHBoxLayout, QLabel, QMainWindow,
     QMessageBox, QProgressBar, QPushButton, QSlider, QTabWidget, QTreeWidget,
     QTreeWidgetItem, QVBoxLayout, QWidget, QListWidget,
     QStackedWidget,
+    QMenu,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
@@ -43,10 +44,13 @@ class Job(QThread):
         self.fn, self.args = fn, args
         self.signals = WorkerSignals()
         self.cancel_flag = threading.Event()
+        self._last_report_at = 0.0
+        self._last_report = None
 
     def run(self):
         try:
             result = self.fn(*self.args, progress=self.report, cancelled=self.cancel_flag.is_set)
+            self._flush_report()
             self.signals.done.emit(result)
         except ScanCancelled:
             self.signals.cancelled.emit()
@@ -54,7 +58,14 @@ class Job(QThread):
             self.signals.failed.emit(str(exc))
 
     def report(self, done, total, label):
-        self.signals.progress.emit(done, total, Path(label).name)
+        self._last_report = (done, total, Path(label).name)
+        if time.monotonic() - self._last_report_at >= 0.1:
+            self._flush_report()
+
+    def _flush_report(self):
+        if self._last_report is not None:
+            self.signals.progress.emit(*self._last_report)
+            self._last_report_at = time.monotonic()
 
 
 class PreviewSignals(QObject):
@@ -144,6 +155,23 @@ class MediaSiftApp(QMainWindow):
         self._pdf_current_path: Path | None = None
         self._setup_media()
         self._build()
+        self._apply_theme()
+
+    def _apply_theme(self):
+        self.setStyleSheet("""
+            QMainWindow, QWidget { background: #f4f7fa; color: #172b42; font-family: 'Segoe UI'; font-size: 10pt; }
+            QTabWidget::pane { border: 1px solid #d8e2eb; background: #ffffff; border-radius: 8px; }
+            QTabBar::tab { background: #e8eef4; color: #40556b; padding: 9px 16px; margin-right: 4px; border-top-left-radius: 6px; border-top-right-radius: 6px; }
+            QTabBar::tab:selected { background: #ffffff; color: #087f83; font-weight: 600; }
+            QTreeWidget, QListWidget { background: #ffffff; border: 1px solid #d8e2eb; border-radius: 6px; alternate-background-color: #f6f9fb; }
+            QHeaderView::section { background: #eaf1f5; color: #29445e; padding: 7px; border: 0; font-weight: 600; }
+            QPushButton { background: #e7eef3; color: #203a54; border: 1px solid #cbd8e2; border-radius: 6px; padding: 8px 13px; }
+            QPushButton:hover:enabled { background: #dce9ef; }
+            QPushButton:disabled { color: #8797a5; background: #eef2f5; }
+            QProgressBar { background: #e5edf2; border: 0; border-radius: 5px; height: 12px; text-align: center; }
+            QProgressBar::chunk { background: #15989a; border-radius: 5px; }
+            QToolTip { background: #17334d; color: white; border: 0; padding: 6px; }
+        """)
 
     def _setup_media(self):
         self.player = QMediaPlayer(self)
@@ -164,6 +192,7 @@ class MediaSiftApp(QMainWindow):
 
     def _build_scan(self):
         root = QVBoxLayout(self.scan_page)
+        root.setContentsMargins(20, 18, 20, 16); root.setSpacing(12)
         row = QHBoxLayout()
         root.addWidget(QLabel("Source folders (Ctrl/Shift-click to select multiple)"))
         self.source_list = QListWidget()
@@ -189,13 +218,22 @@ class MediaSiftApp(QMainWindow):
         self.pdf_tree = QTreeWidget(); self.pdf_tree.setHeaderLabels(["Group / file", "Files / size"]); self.results_tabs.addTab(self.pdf_tree, "Duplicate PDFs")
         self.issue_tree = QTreeWidget(); self.issue_tree.setHeaderLabels(["Path", "Message"])
         self.results_tabs.addTab(self.issue_tree, "Issues")
+        for tree in (self.group_tree, self.video_tree, self.pdf_tree):
+            tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+            tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            tree.customContextMenuRequested.connect(lambda point, tree=tree: self._result_context_menu(tree, point))
+            tree.installEventFilter(self)
         controls = QHBoxLayout(); self.progress = QProgressBar(); controls.addWidget(self.progress, 1)
         self.status = QLabel("Ready"); controls.addWidget(self.status); root.addLayout(controls)
-        actions = QHBoxLayout(); actions.addStretch()
+        actions = QHBoxLayout()
+        self.copy_paths_button = QPushButton("Copy paths", clicked=self._copy_selected_paths)
+        self.copy_paths_button.setToolTip("Copy selected file paths. Select a file or group; Ctrl+C also works.")
+        actions.addWidget(self.copy_paths_button); actions.addStretch()
         self.cancel_button = QPushButton("Cancel", clicked=self._cancel); self.cancel_button.setEnabled(False)
         self.scan_button = QPushButton("Start scan", clicked=self._start_scan)
         self.full_rescan_button = QPushButton("Full rescan", clicked=self._start_full_rescan)
         self.export_button = QPushButton("Export results", clicked=self._start_export); self.export_button.setEnabled(False)
+        self._update_export_tooltip()
         actions.addWidget(self.cancel_button); actions.addWidget(self.scan_button); actions.addWidget(self.full_rescan_button); actions.addWidget(self.export_button); root.addLayout(actions)
 
     def _build_review(self):
@@ -259,6 +297,27 @@ class MediaSiftApp(QMainWindow):
         self._make_shortcut("D", lambda: self._decide("keep")); self._make_shortcut("Right", lambda: self._decide("keep"))
         self._make_shortcut("S", self._skip); self._make_shortcut("Backspace", self._previous); self._make_shortcut("Space", self._toggle_play)
         self._make_shortcut("PgUp", lambda: self._change_pdf_page(-1)); self._make_shortcut("PgDown", lambda: self._change_pdf_page(1))
+        # Every button has a short English explanation, including controls whose
+        # action is temporarily unavailable.
+        for button in self.findChildren(QPushButton):
+            if not button.toolTip():
+                button.setToolTip(f"{button.text()} — perform this action.")
+        for button, tip in ((self.add_button, "Add one or more source folders to scan."),
+                            (self.remove_button, "Remove the selected source folders."),
+                            (self.dest_button, "Choose where duplicate files will be exported."),
+                            (self.scan_button, "Scan the selected folders for duplicate images, videos, and PDFs."),
+                            (self.full_rescan_button, "Scan again and rebuild the saved scan data."),
+                            (self.cancel_button, "Cancel the current scan or export operation."),
+                            (self.review_choose, "Choose a folder containing images, videos, and PDFs to review."),
+                            (self.pdf_previous_button, "Show the previous page of the current PDF."),
+                            (self.pdf_next_button, "Show the next page of the current PDF."),
+                            (self.play_button, "Play or pause the current video."),
+                            (self.previous_button, "Return to the previous review item (Backspace)."),
+                            (self.skip_button, "Leave this item undecided and move to another (S)."),
+                            (self.export_kept_button, "Copy kept files to a destination folder."),
+                            (self.open_player, "Open this file in your system's default media app.")):
+            button.setToolTip(tip)
+        self._update_export_tooltip()
 
     def _make_shortcut(self, key, callback):
         shortcut = QShortcut(QKeySequence(key), self)
@@ -298,6 +357,7 @@ class MediaSiftApp(QMainWindow):
 
     def _invalidate_scan(self):
         self.result = None; self.export_button.setEnabled(False); self._clear_results()
+        self._update_export_tooltip()
         self.summary.setText("Settings changed. Start the scan again.")
 
     def _clear_results(self): self.group_tree.clear(); self.video_tree.clear(); self.pdf_tree.clear(); self.issue_tree.clear()
@@ -308,15 +368,17 @@ class MediaSiftApp(QMainWindow):
             QMessageBox.warning(self, "No source folders", "Please add at least one source folder."); return
         if self.destination is None:
             QMessageBox.warning(self, "No destination folder", "Please choose a destination folder."); return
-        self.result = None; self.export_button.setEnabled(False); self._clear_results(); self.summary.setText("Preparing scan…")
+        self.result = None; self.export_button.setEnabled(False); self._update_export_tooltip(); self._clear_results(); self.summary.setText("Preparing scan…")
         self._start_job(scan_sources, list(self.sources), self.destination, "Scan")
 
     def _start_full_rescan(self):
         if self.busy or not self.sources or self.destination is None: return
-        self.result = None; self.export_button.setEnabled(False); self._clear_results(); self.summary.setText("Preparing full rescan…")
+        self.result = None; self.export_button.setEnabled(False); self._update_export_tooltip(); self._clear_results(); self.summary.setText("Preparing full rescan…")
         self._start_job(partial(scan_sources, full_rescan=True), list(self.sources), self.destination, "Full rescan")
 
     def _start_export(self):
+        if self.busy:
+            return
         if self.result is not None and self.destination is not None:
             self._start_job(partial(export_scan, sources=list(self.sources)), self.result, self.destination, "Export")
 
@@ -325,6 +387,7 @@ class MediaSiftApp(QMainWindow):
         self.busy = True; self.progress.setValue(0); self.status.setText(f"Preparing {title.lower()}…")
         for button in (self.add_button, self.remove_button, self.dest_button, self.scan_button, self.full_rescan_button): button.setEnabled(False)
         self.cancel_button.setEnabled(True); self.export_button.setEnabled(False)
+        self._update_export_tooltip()
         self.job = Job(fn, *args); self.job.signals.progress.connect(self._progress); self.job.signals.done.connect(lambda r: self._job_done(r, title))
         self.job.signals.failed.connect(lambda e: self._job_failed(e, title)); self.job.signals.cancelled.connect(lambda: self._job_cancelled(title)); self._launch_job(self.job)
 
@@ -344,12 +407,15 @@ class MediaSiftApp(QMainWindow):
         self.busy = False
         for button in (self.add_button, self.remove_button, self.dest_button, self.scan_button, self.full_rescan_button): button.setEnabled(True)
         self.cancel_button.setEnabled(False); self.export_button.setEnabled(self.result is not None)
+        self._update_export_tooltip()
 
     def _job_done(self, outcome, title):
-        self._finish_job()
         if title in {"Scan", "Full rescan"}:
-            self.result = outcome; self._render_result(outcome); self.status.setText("Scan complete")
+            self.result = outcome
+            self._finish_job()
+            self._render_result(outcome); self.status.setText("Scan complete")
         else:
+            self._finish_job()
             self.status.setText("Export complete" if not outcome.cancelled else "Export cancelled")
             self._render_result(self.result)
             for issue in outcome.issues: self._add_issue(issue.path, issue.message)
@@ -359,6 +425,53 @@ class MediaSiftApp(QMainWindow):
         self._finish_job(); self.status.setText("Error"); QMessageBox.critical(self, f"{title} failed", error)
 
     def _job_cancelled(self, title): self._finish_job(); self.status.setText(f"{title} cancelled")
+
+    def _update_export_tooltip(self):
+        if self.busy:
+            self.export_button.setToolTip("Export is unavailable while another operation is running.")
+        elif getattr(self, "result", None) is None:
+            self.export_button.setToolTip("Run a scan to enable exporting duplicate results.")
+        else:
+            self.export_button.setToolTip("Export the current scan results to the destination folder.")
+
+    def _copy_selected_paths(self):
+        paths = []
+        seen = set()
+        tree = self.results_tabs.currentWidget()
+        if tree in (self.group_tree, self.video_tree, self.pdf_tree):
+            selected_set = set(tree.selectedItems())
+            def visit(item, covered=False):
+                covered = covered or item in selected_set
+                if item.childCount() == 0 and covered:
+                    path = item.text(0)
+                    if path and not path.startswith("Group ") and path not in seen:
+                        seen.add(path); paths.append(path)
+                for index in range(item.childCount()):
+                    visit(item.child(index), covered)
+            for index in range(tree.topLevelItemCount()):
+                visit(tree.topLevelItem(index))
+        clipboard = QApplication.clipboard()
+        if paths:
+            clipboard.setText("\n".join(paths))
+            self.status.setText(f"Copied {len(paths)} path{'s' if len(paths) != 1 else ''}")
+        else:
+            self.status.setText("Select a file or duplicate group to copy paths")
+
+    def _result_context_menu(self, tree, point):
+        item = tree.itemAt(point)
+        if item and not item.isSelected():
+            tree.clearSelection(); item.setSelected(True)
+        menu = QMenu(tree)
+        action = menu.addAction("Copy paths")
+        action.triggered.connect(self._copy_selected_paths)
+        menu.exec(tree.viewport().mapToGlobal(point))
+
+    def eventFilter(self, watched, event):
+        if watched in (getattr(self, "group_tree", None), getattr(self, "video_tree", None), getattr(self, "pdf_tree", None)) and event.type() == QEvent.Type.KeyPress:
+            if event.matches(QKeySequence.StandardKey.Copy):
+                self._copy_selected_paths()
+                return True
+        return super().eventFilter(watched, event)
     def _cancel(self):
         if self.job: self.job.cancel_flag.set(); self.cancel_button.setEnabled(False); self.status.setText("Cancelling…")
 

@@ -1,9 +1,43 @@
 from pathlib import Path
+import hashlib
+import struct
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageOps
 
 from mediasift import scan_sources
+
+
+@pytest.mark.parametrize("mode,color", [("RGB", (12, 34, 56)), ("L", 127), ("I;16", 1024)])
+def test_large_striped_hash_matches_original_pixel_hash(tmp_path: Path, mode: str, color) -> None:
+    import mediasift.core as core
+
+    path = tmp_path / "large.png"
+    size = (4200, 4200)
+    Image.new(mode, size, color).save(path)
+    with Image.open(path) as source:
+        image = ImageOps.exif_transpose(source)
+        digest = hashlib.sha256()
+        digest.update(struct.pack(">II", image.width, image.height))
+        if image.mode.startswith("I;16") or image.mode in {"I", "F"}:
+            digest.update(image.mode.encode("ascii"))
+        else:
+            image = image.convert("RGBA")
+            digest.update(b"RGBA")
+        digest.update(image.tobytes())
+
+    assert size[0] * size[1] * (2 if mode == "I;16" else 4) > core._PIXEL_HASH_THRESHOLD
+    assert core._fingerprint(path) == digest.hexdigest()
+
+
+def test_large_striped_hash_checks_cancellation(tmp_path: Path) -> None:
+    import mediasift.core as core
+    from mediasift.models import ScanCancelled
+
+    path = tmp_path / "large.png"
+    Image.new("RGB", (3000, 3000), "purple").save(path)
+    with pytest.raises(ScanCancelled):
+        core._fingerprint(path, lambda: True)
 
 
 def test_groups_decoded_pixels_and_deduplicates_overlapping_roots(tmp_path: Path) -> None:

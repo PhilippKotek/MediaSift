@@ -16,6 +16,8 @@ _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".wmv"}
 _PDF_EXTENSIONS = {".pdf"}
 _REJECTED_IMAGE_EXTENSIONS = {".gif"}
+_PIXEL_HASH_THRESHOLD = 32 * 1024 * 1024
+_PIXEL_HASH_CHUNK = 4 * 1024 * 1024
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -85,21 +87,46 @@ def _record(path: Path) -> FileRecord:
     return FileRecord(path=path, size=stat.st_size, mtime_ns=stat.st_mtime_ns)
 
 
-def _fingerprint(path: Path) -> str:
+def _fingerprint(path: Path, cancelled: Callable[[], bool] | None = None) -> str:
     with Image.open(path) as source:
         if getattr(source, "n_frames", 1) != 1:
             raise ValueError("Animated or multi-frame images are not supported.")
-        image = ImageOps.exif_transpose(source)
-        digest = hashlib.sha256()
-        digest.update(struct.pack(">II", image.width, image.height))
-        if image.mode.startswith("I;16") or image.mode in {"I", "F"}:
-            # Converting high-bit-depth images to RGBA would discard pixel detail.
-            digest.update(image.mode.encode("ascii"))
-        else:
-            image = image.convert("RGBA")
-            digest.update(b"RGBA")
-        digest.update(image.tobytes())
-        return digest.hexdigest()
+        oriented = ImageOps.exif_transpose(source)
+        converted = None
+        try:
+            image = oriented
+            digest = hashlib.sha256()
+            digest.update(struct.pack(">II", image.width, image.height))
+            if image.mode.startswith("I;16") or image.mode in {"I", "F"}:
+                # Converting high-bit-depth images to RGBA would discard pixel detail.
+                digest.update(image.mode.encode("ascii"))
+                bytes_per_pixel = 2 if image.mode.startswith("I;16") else 4
+            else:
+                converted = image.convert("RGBA")
+                image = converted
+                digest.update(b"RGBA")
+                bytes_per_pixel = 4
+
+            row_bytes = image.width * bytes_per_pixel
+            if row_bytes * image.height <= _PIXEL_HASH_THRESHOLD:
+                digest.update(image.tobytes())
+            else:
+                # Keep only one bounded strip's pixel bytes resident at a time.
+                rows_per_chunk = max(1, _PIXEL_HASH_CHUNK // max(1, row_bytes))
+                for top in range(0, image.height, rows_per_chunk):
+                    if cancelled is not None and cancelled():
+                        raise ScanCancelled()
+                    strip = image.crop((0, top, image.width, min(image.height, top + rows_per_chunk)))
+                    try:
+                        digest.update(strip.tobytes())
+                    finally:
+                        strip.close()
+            return digest.hexdigest()
+        finally:
+            if converted is not None:
+                converted.close()
+            if oriented is not source:
+                oriented.close()
 
 
 def _binary_fingerprint(path: Path, expected_size: int, expected_mtime: int,
@@ -177,7 +204,7 @@ def scan_sources(
                 key = (canonical_path_key(record.path), "image", record.size, record.mtime_ns)
                 fingerprint = None if full_rescan else cached.get(key)
                 if fingerprint is None:
-                    fingerprint = _fingerprint(path)
+                    fingerprint = _fingerprint(path, cancelled)
                     image_hashes += 1
                     pending_cache.append((record.path, "image", record.size, record.mtime_ns, fingerprint))
                 else:
@@ -186,6 +213,8 @@ def scan_sources(
                 if (after.st_size, after.st_mtime_ns) != (record.size, record.mtime_ns):
                     raise OSError("File changed while scanning; retry the scan.")
                 grouped.setdefault(fingerprint, []).append(record)
+        except MemoryError:
+            issues.append(ScanIssue(path, "Insufficient memory to hash image."))
         except (OSError, ValueError, EOFError, SyntaxError, Image.DecompressionBombError, UnidentifiedImageError) as exc:
             issues.append(ScanIssue(path, str(exc) or "Unable to read image."))
         if progress is not None:

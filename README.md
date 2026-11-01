@@ -10,16 +10,16 @@ For example, add several old phone and cloud-backup folders, export one copy of 
 
 ## Download for Windows
 
-The latest published Windows x64 release is [v0.1.0](https://github.com/PhilippKotek/MediaSift/releases/tag/v0.1.0). It predates the Review, video deduplication, and PDF features documented here. Until the next release, build the current `develop` branch with `build.ps1` as described in [CONTRIBUTING.md](CONTRIBUTING.md). The build creates a versioned Windows ZIP containing `MediaSift.exe` and its notices. The executable runs without a Python installation.
+The latest published Windows x64 release is [v0.1.0](https://github.com/PhilippKotek/MediaSift/releases/tag/v0.1.0). It predates the Review, video deduplication, and PDF features documented here. The current development build is v0.2.1; build the `develop` branch with `build.ps1` as described in [CONTRIBUTING.md](CONTRIBUTING.md). It creates `dist/MediaSift-v0.2.1/MediaSift.exe` and `dist/MediaSift-v0.2.1-windows-x64.zip`, with third-party notices and PDFium licenses included. The executable runs without a Python installation.
 
 ## Find duplicates across folders
 
 1. Click **Add folder…** and select the folders to combine. Ctrl- or Shift-click to choose several folders in the same location; open the picker again for folders elsewhere.
-2. Choose a destination outside the source folders, then click **Start scan**.
+2. Choose a destination outside the source folders. Hover over controls for short help, then click **Start scan**.
 3. Review groups and click **Export results**.
 4. The timestamped `MediaSift_YYYYMMDD_HHMMSS` folder contains `Images`, `Videos`, and `PDFs` subfolders plus `Manifest.txt`. The manifest lists selected roots, output-to-source mappings, omitted duplicate members, counts, issues, and cancellation status.
 
-The export includes one representative per exact duplicate group. The representative is the file with the alphabetically first full path (case-insensitive, with a case-sensitive tie-break). Matching is exact: image files match by decoded pixels and dimensions after EXIF orientation; videos and PDFs match by exact file bytes. Visually similar images, re-encoded videos, and PDFs with different bytes remain separate.
+The export includes one representative per exact duplicate group. The representative is the file with the alphabetically first full path (case-insensitive, with a case-sensitive tie-break). Matching is exact: image files match by decoded pixels and dimensions after EXIF orientation; videos and PDFs match by exact file bytes. Visually similar images, re-encoded videos, and PDFs with different bytes remain separate. Select a file or duplicate group and use **Copy paths**, `Ctrl+C`, or the right-click menu to copy its source path or all paths in the group. Scanning large images uses less temporary memory; repeat scans reuse cached fingerprints.
 
 ## Review a folder
 

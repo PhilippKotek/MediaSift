@@ -20,6 +20,13 @@ $python = Join-Path $PSScriptRoot '.venv-build\Scripts\python.exe'
 & $python -m pip install -e '.[build]'
 if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
 
+& $python 'docs/assets/render_icon.py'
+if ($LASTEXITCODE -ne 0) { throw 'Icon rendering failed' }
+$version = (& $python -c "from importlib.metadata import version; print(version('mediasift'))" ).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $version) { throw 'Could not determine MediaSift version' }
+$distRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ("dist/MediaSift-v$version")))
+New-Item -ItemType Directory -Force -Path $distRoot | Out-Null
+
 # PyInstaller's host PATH scan can collect Poppler's ICU DLLs. Those names
 # collide with the Windows ICU APIs Qt expects, so filter them from binaries.
 # The rest of PySide6's hook-collected multimedia plugins and FFmpeg DLLs stay.
@@ -61,16 +68,15 @@ exe = EXE(
 '@
 New-Item -ItemType Directory -Force -Path (Join-Path $PSScriptRoot 'build') | Out-Null
 [IO.File]::WriteAllText((Join-Path $PSScriptRoot 'build\MediaSift.spec'), $spec, [Text.UTF8Encoding]::new($false))
-& $python -m PyInstaller --noconfirm --clean 'build\MediaSift.spec'
+& $python -m PyInstaller --noconfirm --clean --distpath $distRoot 'build\MediaSift.spec'
 if ($LASTEXITCODE -ne 0) { throw 'EXE build failed' }
 
 # Keep a readable license notice next to the onefile executable for users.
-Copy-Item -LiteralPath 'THIRD_PARTY_NOTICES.md' -Destination 'dist\THIRD_PARTY_NOTICES.md' -Force
+Copy-Item -LiteralPath 'THIRD_PARTY_NOTICES.md' -Destination (Join-Path $distRoot 'THIRD_PARTY_NOTICES.md') -Force
 $pdfiumLicenses = & $python -c "from importlib.metadata import distribution; from pathlib import Path; print(Path(distribution('pypdfium2')._path) / 'licenses')"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $pdfiumLicenses -PathType Container)) {
     throw "Could not locate pypdfium2 license files: $pdfiumLicenses"
 }
-$distRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'dist'))
 $pdfiumSidecar = [IO.Path]::GetFullPath((Join-Path $distRoot 'PDFium_Licenses'))
 if (-not $pdfiumSidecar.StartsWith($distRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Refusing to replace a directory outside the build output: $pdfiumSidecar"
@@ -80,9 +86,7 @@ if (Test-Path -LiteralPath $pdfiumSidecar) {
 }
 New-Item -ItemType Directory -Path $pdfiumSidecar | Out-Null
 Copy-Item -Path (Join-Path $pdfiumLicenses '*') -Destination $pdfiumSidecar -Recurse -Force
-$version = (& $python -c "from importlib.metadata import version; print(version('mediasift'))").Trim()
-if ($LASTEXITCODE -ne 0 -or -not $version) { throw 'Could not determine MediaSift version' }
-$archive = Join-Path $distRoot "MediaSift-v${version}-windows-x64.zip"
+$archive = Join-Path (Join-Path $PSScriptRoot 'dist') "MediaSift-v${version}-windows-x64.zip"
 if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
 $archiveFiles = @(
     (Join-Path $distRoot 'MediaSift.exe'),
@@ -90,7 +94,7 @@ $archiveFiles = @(
     $pdfiumSidecar
 )
 Compress-Archive -LiteralPath $archiveFiles -DestinationPath $archive -CompressionLevel Optimal
-Write-Host "EXE: $(Join-Path $PSScriptRoot 'dist\MediaSift.exe')"
-Write-Host "Notices: $(Join-Path $PSScriptRoot 'dist\THIRD_PARTY_NOTICES.md')"
-Write-Host "PDFium licenses: $(Join-Path $PSScriptRoot 'dist\PDFium_Licenses')"
+Write-Host "EXE: $(Join-Path $distRoot 'MediaSift.exe')"
+Write-Host "Notices: $(Join-Path $distRoot 'THIRD_PARTY_NOTICES.md')"
+Write-Host "PDFium licenses: $(Join-Path $distRoot 'PDFium_Licenses')"
 Write-Host "Package: $archive"
