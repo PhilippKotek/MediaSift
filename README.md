@@ -10,7 +10,7 @@ For example, add several old phone and cloud-backup folders, export one copy of 
 
 ## Download for Windows
 
-The latest published Windows x64 release is [v0.1.0](https://github.com/PhilippKotek/MediaSift/releases/tag/v0.1.0). It predates the Review, video deduplication, and PDF features documented here. Until the next release, build the current `develop` branch with `build.ps1` as described in [CONTRIBUTING.md](CONTRIBUTING.md). The built `MediaSift.exe` runs without a Python installation.
+The latest published Windows x64 release is [v0.1.0](https://github.com/PhilippKotek/MediaSift/releases/tag/v0.1.0). It predates the Review, video deduplication, and PDF features documented here. Until the next release, build the current `develop` branch with `build.ps1` as described in [CONTRIBUTING.md](CONTRIBUTING.md). The build creates a versioned Windows ZIP containing `MediaSift.exe` and its notices. The executable runs without a Python installation.
 
 ## Find duplicates across folders
 

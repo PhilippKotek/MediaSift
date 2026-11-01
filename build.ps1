@@ -80,6 +80,17 @@ if (Test-Path -LiteralPath $pdfiumSidecar) {
 }
 New-Item -ItemType Directory -Path $pdfiumSidecar | Out-Null
 Copy-Item -Path (Join-Path $pdfiumLicenses '*') -Destination $pdfiumSidecar -Recurse -Force
+$version = (& $python -c "from importlib.metadata import version; print(version('mediasift'))").Trim()
+if ($LASTEXITCODE -ne 0 -or -not $version) { throw 'Could not determine MediaSift version' }
+$archive = Join-Path $distRoot "MediaSift-v${version}-windows-x64.zip"
+if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
+$archiveFiles = @(
+    (Join-Path $distRoot 'MediaSift.exe'),
+    (Join-Path $distRoot 'THIRD_PARTY_NOTICES.md'),
+    $pdfiumSidecar
+)
+Compress-Archive -LiteralPath $archiveFiles -DestinationPath $archive -CompressionLevel Optimal
 Write-Host "EXE: $(Join-Path $PSScriptRoot 'dist\MediaSift.exe')"
 Write-Host "Notices: $(Join-Path $PSScriptRoot 'dist\THIRD_PARTY_NOTICES.md')"
 Write-Host "PDFium licenses: $(Join-Path $PSScriptRoot 'dist\PDFium_Licenses')"
+Write-Host "Package: $archive"
